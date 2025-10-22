@@ -43,10 +43,15 @@ import { useForm } from 'react-hook-form';
 import { Button } from '../ui/button';
 import { useQueryState } from 'nuqs';
 import { Toolbar } from './toolbar';
-import pluralize from 'pluralize';
 import { toast } from 'sonner';
 import { z } from 'zod';
 const shortcodeRegex = /:([a-zA-Z0-9_+-]+):/g;
+
+// Simple pluralize function to replace the library
+const pluralize = (word: string, count: number, includeCount: boolean = false): string => {
+  const plural = count === 1 ? word : word + 's';
+  return includeCount ? `${count} ${plural}` : plural;
+};
 
 type ThreadContent = {
   from: string;
