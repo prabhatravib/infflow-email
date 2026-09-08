@@ -474,6 +474,9 @@
       ],
     },
     "production": {
+      // Without an explicit name, legacy envs deploy to "<top-level name>-production",
+      // i.e. infflow-api-production-production, which nothing calls.
+      "name": "infflow-api-production",
       "d1_databases": [
         {
           "binding": "DB",
@@ -562,6 +565,16 @@
         "GOOGLE_CLIENT_ID": "363401296279-vo7al766jmct0gcat24rrn2grv2jh1p5.apps.googleusercontent.com",
         "GOOGLE_CLIENT_SECRET": "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",
         "AUTUMN_SECRET_KEY": "dummy",
+        // vars are NOT inherited from the top level; these must be repeated per env.
+        "CLOUDFLARE_ACCOUNT_ID": "5d42835376e52c0332f76de9f9877fc8",
+        "VOICE_SECRET": "1234567890",
+        "USE_OPENAI": "true",
+        "AUTORAG_ID": "",
+        // OPENAI_API_KEY is deliberately NOT here: the top-level value is a dummy.
+        // Set a real one with:
+        //   wrangler secret put OPENAI_API_KEY --name infflow-api-production
+        // Deliberately omitted (unused by the worker): DATABASE_URL (DB comes from
+        // HYPERDRIVE), ELEVENLABS_API_KEY, MICROSOFT_CLIENT_ID/SECRET (code commented out).
       },
       "kv_namespaces": [
         {

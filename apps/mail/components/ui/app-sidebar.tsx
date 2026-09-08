@@ -18,6 +18,7 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import { Button } from '@/components/ui/button';
 import { useAIFullScreen } from './ai-sidebar';
 import { useStats } from '@/hooks/use-stats';
+import { HexaPanel } from './hexa-panel';
 import { useLocation } from 'react-router';
 
 import { m } from '@/paraglide/messages';
@@ -95,7 +96,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             )}
           </SidebarHeader>
           <SidebarContent
-            className={`scrollbar scrollbar-w-1 scrollbar-thumb-accent/40 scrollbar-track-transparent hover:scrollbar-thumb-accent scrollbar-thumb-rounded-full overflow-x-hidden py-0 pt-0 ${state !== 'collapsed' ? 'mt-5 md:px-4' : 'px-2'}`}
+            // flex-initial, not the default flex-1: the folder list takes only
+            // the height it needs so the voice pane below can have the rest,
+            // while still shrinking and scrolling in a short window.
+            className={`scrollbar scrollbar-w-1 scrollbar-thumb-accent/40 scrollbar-track-transparent hover:scrollbar-thumb-accent scrollbar-thumb-rounded-full flex-initial overflow-x-hidden py-0 pt-0 ${state !== 'collapsed' ? 'mt-5 md:px-4' : 'px-2'}`}
           >
             <div className="flex-1 py-0">
               <NavMain items={navItems} />
@@ -103,6 +107,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           </SidebarContent>
 
           {/* Zero Pro upgrade popup removed */}
+
+          {state !== 'collapsed' && (
+            <div className="flex min-h-0 flex-1 flex-col px-0 pb-2 md:px-4">
+              <HexaPanel />
+            </div>
+          )}
 
           <SidebarFooter className={`px-0 pb-0 ${state === 'collapsed' ? 'md:px-2' : 'md:px-4'}`}>
             <NavMain items={bottomNavItems} />

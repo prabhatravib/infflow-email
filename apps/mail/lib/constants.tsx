@@ -4,8 +4,10 @@ export const I18N_LOCALE_COOKIE_NAME = 'i18n:locale';
 export const SIDEBAR_COOKIE_NAME = 'sidebar:state';
 export const AI_SIDEBAR_COOKIE_NAME = 'ai-sidebar:state';
 export const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
-export const SIDEBAR_WIDTH = '14rem';
-export const SIDEBAR_WIDTH_MOBILE = '14rem';
+// Wide enough for the embedded Hexa voice pane to render its hexagon and
+// transcript at the same scale the calendar app uses.
+export const SIDEBAR_WIDTH = '20rem';
+export const SIDEBAR_WIDTH_MOBILE = '20rem';
 export const SIDEBAR_WIDTH_ICON = '3rem';
 export const SIDEBAR_KEYBOARD_SHORTCUT = 'b';
 export const BASE_URL = import.meta.env.VITE_PUBLIC_APP_URL;

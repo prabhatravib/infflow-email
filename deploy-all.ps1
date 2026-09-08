@@ -1,4 +1,4 @@
-# deploy-all.ps1 - Zero Email Deployment Script
+# deploy-all.ps1 - Infflow Email Deployment Script
 #requires -Version 5.1
 param(
     [string]$Root = $PSScriptRoot,
@@ -10,6 +10,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Run unattended: never emit a confirmation prompt or a progress bar.
+$ConfirmPreference = 'None'
+$ProgressPreference = 'SilentlyContinue'
 if (-not $Root) { $Root = (Get-Location).Path }
 
 # Color functions for better output
@@ -24,6 +27,8 @@ $Config = @{
     BackendApp = "infflow-api-production"
     FrontendUrl = "https://infflow-email.prabhatravib.workers.dev"
     BackendUrl = "https://infflow-api-production.prabhatravib.workers.dev"
+    # / just 302s to the frontend; /health is the actual liveness route (main.ts:629).
+    BackendHealthUrl = "https://infflow-api-production.prabhatravib.workers.dev/health"
     FrontendDir = "apps\mail"
     BackendDir = "apps\server"
 }
@@ -83,26 +88,77 @@ function Invoke-DeployProject {
     }
 }
 
+function Get-HttpStatus {
+    param(
+        [string]$Url,
+        [int]$TimeoutSec = 30
+    )
+
+    # Deliberately NOT Invoke-WebRequest: in Windows PowerShell 5.1 it parses responses with
+    # the Internet Explorer engine and interactively prompts ("Security Warning: Script
+    # Execution Risk") on machines where IE first-run setup never completed. HttpWebRequest
+    # never parses HTML, so it can never prompt.
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol =
+            [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+
+        $request = [System.Net.HttpWebRequest]::Create($Url)
+        $request.Method = 'GET'
+        $request.AllowAutoRedirect = $false
+        $request.Timeout = $TimeoutSec * 1000
+        $request.UserAgent = 'infflow-deploy-healthcheck'
+
+        $response = $request.GetResponse()
+        $code = [int]$response.StatusCode
+        $response.Close()
+        return $code
+    } catch [System.Net.WebException] {
+        # A 4xx/5xx still means something answered - report its status rather than failing.
+        if ($_.Exception.Response) {
+            $code = [int]$_.Exception.Response.StatusCode
+            $_.Exception.Response.Close()
+            return $code
+        }
+        return 0    # DNS failure, TLS error or timeout: nothing answered at all
+    } catch {
+        return 0
+    }
+}
+
 function Test-Deployment {
     param(
         [string]$Url,
-        [string]$ProjectName
+        [string]$ProjectName,
+        [int]$Attempts = 3,
+        [int]$RetryDelaySec = 5
     )
-    
+
     Write-Info "Testing $ProjectName deployment at $Url..."
-    try {
-        $response = Invoke-WebRequest -Uri $Url -Method GET -TimeoutSec 30 -ErrorAction Stop
-        if ($response.StatusCode -eq 200) {
-            Write-Success "[OK] $ProjectName is responding correctly"
+
+    for ($i = 1; $i -le $Attempts; $i++) {
+        $status = Get-HttpStatus -Url $Url
+        $label = if ($status -eq 0) { 'no response (DNS, TLS or timeout)' } else { "HTTP $status" }
+
+        if ($status -eq 200) {
+            Write-Success "[OK] $ProjectName is responding correctly (HTTP 200)"
             return $true
-        } else {
-            Write-Warning "[WARNING] $ProjectName returned status code $($response.StatusCode)"
-            return $false
         }
-    } catch {
-        Write-Warning "[WARNING] $ProjectName health check failed: $_"
-        return $false
+
+        # A redirect or an auth challenge still proves the Worker is live and routing.
+        if (($status -ge 300 -and $status -lt 400) -or $status -eq 401 -or $status -eq 403) {
+            Write-Success "[OK] $ProjectName is live ($label)"
+            return $true
+        }
+
+        if ($i -lt $Attempts) {
+            Write-Info "  Attempt $i/$Attempts got $label - retrying in $RetryDelaySec s (a fresh deploy takes a moment to propagate)"
+            Start-Sleep -Seconds $RetryDelaySec
+        } else {
+            Write-Warning "[WARNING] $ProjectName health check failed after $Attempts attempts: $label"
+        }
     }
+
+    return $false
 }
 
 function Show-DeploymentSummary {
@@ -118,7 +174,7 @@ function Show-DeploymentSummary {
 
 # Main execution
 try {
-    Write-Success "[START] Zero Email Deployment Process"
+    Write-Success "[START] Infflow Email Deployment Process"
     Write-Info "============================================="
     Write-Info "Environment: $Environment"
     Write-Info "Force mode: $Force"
@@ -171,7 +227,10 @@ try {
     if (-not $SkipFrontend) {
         Write-Info "`nDeploying frontend..."
         try {
-            Invoke-DeployProject -ProjectName "Frontend" -ProjectDir $Config.FrontendDir -Environment "production"
+            # NOTE: no -Environment here. The Cloudflare Vite plugin writes an already-resolved
+            # config to build/client/wrangler.json, and wrangler rejects --env against a
+            # redirected config. Select the env at build time with $env:CLOUDFLARE_ENV instead.
+            Invoke-DeployProject -ProjectName "Frontend" -ProjectDir $Config.FrontendDir
             Write-Success "[OK] Frontend deployment completed"
         } catch {
             Write-Error "[ERROR] Frontend deployment failed."
@@ -185,7 +244,7 @@ try {
     # Step 5: Health checks (optional)
     if (-not $SkipBackend -and -not $SkipFrontend) {
         Write-Info "`nPerforming health checks..."
-        $backendHealthy = Test-Deployment -Url $Config.BackendUrl -ProjectName "Backend"
+        $backendHealthy = Test-Deployment -Url $Config.BackendHealthUrl -ProjectName "Backend"
         $frontendHealthy = Test-Deployment -Url $Config.FrontendUrl -ProjectName "Frontend"
         
         if ($backendHealthy -and $frontendHealthy) {
@@ -204,4 +263,4 @@ try {
     exit 1
 }
 
-Write-Success "`n[SUCCESS] Zero Email deployment process completed successfully!"
+Write-Success "`n[SUCCESS] Infflow-Email deployment process completed successfully!"

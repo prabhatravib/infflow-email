@@ -393,3 +393,86 @@
 .style-scrollbar {
   @apply scrollbar scrollbar-w-0 scrollbar-thumb-accent/40 scrollbar-track-transparent hover:scrollbar-thumb-accent scrollbar-thumb-rounded-full;
 }
+
+/* Embedded Hexa voice pane, between the folder list and the settings button. */
+.hexa-panel {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  /* Fills the gap between the folder list and the settings button. The cap
+     stops a tall window from stretching the hexagon out of proportion; the
+     floor keeps the transcript usable on a short one, where the folder list
+     above scrolls instead. */
+  flex: 1;
+  min-height: 16rem;
+  max-height: 44rem;
+  min-width: 0;
+  border-radius: 0.75rem;
+  /* The scaled frame's layout box is taller than its visible box. Unlike
+     hidden, clip stops a transcript scrollIntoView from scrolling this host
+     container and pushing the hexagon out of view. */
+  overflow: clip;
+}
+
+.hexa-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.hexa-panel__reset {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 9999px;
+  background: #006ffe;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.hexa-panel__reset:hover {
+  background: #0059cc;
+}
+
+.hexa-panel__reset:focus-visible {
+  outline: 2px solid #006ffe;
+  outline-offset: 2px;
+}
+
+.hexa-panel__reset:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.hexa-panel__body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: clip;
+}
+
+/* Below the breakpoint the sidebar is too narrow for Hexa's own controls, so
+   the frame is laid out wide and scaled down rather than cramped. */
+.hexa-panel__frame {
+  display: block;
+  width: calc(100% / 0.7);
+  height: calc(100% / 0.7);
+  border: 0;
+  transform: scale(0.7);
+  transform-origin: top left;
+}
+
+@container (min-width: 360px) {
+  .hexa-panel__frame {
+    width: 100%;
+    height: 100%;
+    transform: none;
+  }
+}
