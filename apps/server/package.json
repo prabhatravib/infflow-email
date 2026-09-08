@@ -7,6 +7,7 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types --env local",
     "lint": "eslint .",
+    "test": "node --import tsx --test \"src/lib/__tests__/*.test.ts\"",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
@@ -18,7 +19,8 @@
     "./trpc": "./src/trpc/index.ts",
     "./auth": "./src/lib/auth.ts",
     "./auth-providers": "./src/lib/auth-providers.ts",
-    "./schemas": "./src/lib/schemas.ts"
+    "./schemas": "./src/lib/schemas.ts",
+    "./email-reference": "./src/lib/email-reference.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "1.2.12",

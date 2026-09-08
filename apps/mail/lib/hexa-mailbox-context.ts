@@ -1,7 +1,8 @@
 /**
- * Turns what the mail client already has loaded into the plain-text pack the
- * Hexa voice worker reads. Headers only — sender, subject, date, read state and
- * AI group — never message bodies.
+ * Turns the folder listing the mail client already has loaded into the mailbox
+ * overview section of the Hexa reference pack: sender, subject, date, read state
+ * and AI group. Message bodies belong to the conversation the user has open and
+ * are added by `hexa-email-context.ts`, which owns the shared character budget.
  *
  * The worker stores this pack in a Durable Object whose value cap is 128 KiB,
  * and UTF-16 serialization doubles the byte size, so anything past ~60K chars is
@@ -69,7 +70,10 @@ function formatReceivedOn(receivedOn: string): string {
   });
 }
 
-export function formatMailboxSummary(snapshot: MailboxSnapshot): string {
+export function formatMailboxSummary(
+  snapshot: MailboxSnapshot,
+  maxChars: number = MAX_CONTEXT_CHARS,
+): string {
   const { folder, folderCounts, groupCounts, threads, listedThreadCount } = snapshot;
 
   let summary = `# Mailbox summary\n\n`;
@@ -110,8 +114,8 @@ export function formatMailboxSummary(snapshot: MailboxSnapshot): string {
     summary += `\nThe folder holds more threads than are loaded here. Do not claim the list is complete.\n`;
   }
 
-  return summary.length > MAX_CONTEXT_CHARS
-    ? `${summary.slice(0, MAX_CONTEXT_CHARS)}\n\n[context truncated]\n`
+  return summary.length > maxChars
+    ? `${summary.slice(0, Math.max(0, maxChars - 24))}\n\n[overview truncated]\n`
     : summary;
 }
 
@@ -119,6 +123,6 @@ export function formatMailboxPrompt(snapshot: MailboxSnapshot): string {
   return (
     `Mailbox context for the "${snapshot.folder || 'unknown'}" folder: ` +
     `${snapshot.threads.length} of ${snapshot.listedThreadCount} listed threads have headers loaded. ` +
-    `Answer from these headers only — message bodies are not available to you.`
+    `Answer about the folder listing from these headers only.`
   );
 }

@@ -1,7 +1,17 @@
-import { formatMailboxPrompt, formatMailboxSummary } from '@/lib/hexa-mailbox-context';
+import { buildEmailContextPack, type SelectedEmailContext } from '@/lib/hexa-email-context';
+import {
+  formatImageAnalysisReply,
+  NO_EMAIL_OPEN_MESSAGE,
+  STALE_IMAGE_RESULT_MESSAGE,
+  type ImageAnalysisResult,
+} from '@/lib/hexa-email-image-reply';
+import { EmailContextTracker, type SendTicket } from '@/lib/hexa-email-delivery';
+import { useSelectedEmailContext } from '@/hooks/use-selected-email-context';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMailboxSnapshot } from '@/hooks/use-mailbox-snapshot';
+import { useTRPC } from '@/providers/query-provider';
 import { sessionManager } from '@/lib/hexa-session';
+import { useMutation } from '@tanstack/react-query';
 
 const DEFAULT_HEXA_WORKER_URL = 'https://hexa-worker-v2.prabhatravib.workers.dev';
 
@@ -12,12 +22,18 @@ interface HexaPanelProps {
   hexaWorkerUrl?: string;
 }
 
+type ContextStatus = 'idle' | 'syncing' | 'failed';
+
 /**
  * The voice pane that lives in the mail sidebar between the folder list and the
  * settings button: Hexa's hexagon on top, its transcript below. The worker runs
- * in its own origin, so the host talks to it two ways — a `postMessage` channel
- * for presentation, and a POST to `/api/external-data` for the mailbox context
- * the assistant answers from.
+ * in its own origin, so the host talks to it three ways — a `postMessage` channel
+ * for presentation, a POST to `/api/external-data` carrying the email reference
+ * pack, and the same `postMessage` channel in reverse when Hexa asks to look at
+ * an image in the open email.
+ *
+ * Context updates are silent: nothing here starts a turn, so selecting an email
+ * never makes Hexa speak and never restarts the conversation.
  *
  * Adapted from infflow-calendar (calendar-worker/web/src/components/HexaWorker.tsx).
  */
@@ -27,13 +43,25 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
   const workerOrigin = useMemo(() => new URL(workerUrl).origin, [workerUrl]);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [contextStatus, setContextStatus] = useState<ContextStatus>('idle');
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const lastSentDataRef = useRef<string | null>(null);
   const iframeSetupTimeoutsRef = useRef<number[]>([]);
+  const retryTimeoutRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const presentationRef = useRef({ visualHidden: true, transcriptHidden: true });
+  const trackerRef = useRef(new EmailContextTracker());
 
   const snapshot = useMailboxSnapshot();
+  const { selected, scopeId } = useSelectedEmailContext();
+  const trpc = useTRPC();
+  const { mutateAsync: describeThreadImages } = useMutation(
+    trpc.mail.describeThreadImages.mutationOptions(),
+  );
+
+  // Kept in a ref so the postMessage listener always answers about the email that
+  // is open at the moment the question arrives, not the one it closed over.
+  const selectedRef = useRef<SelectedEmailContext | null>(selected);
+  selectedRef.current = selected;
 
   const configureIframe = useCallback(() => {
     const frame = iframeRef.current?.contentWindow;
@@ -80,44 +108,121 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
     return unsubscribe;
   }, []);
 
-  // Push the mailbox context to the worker whenever it actually changes.
+  // A replacement session starts with no stored record, so everything the
+  // assistant was told has to be delivered again.
   useEffect(() => {
     if (!sessionId) return;
-    // The sidebar renders on the settings routes too, where there is no folder
-    // to describe. Keep the last mailbox the assistant was told about rather
-    // than overwriting it with an empty one.
-    if (!snapshot.folder) return;
+    trackerRef.current.markStale();
+  }, [sessionId]);
 
-    const summary = formatMailboxSummary(snapshot);
-    const dataHash = JSON.stringify({ summary, sessionId, workerUrl });
-    if (dataHash === lastSentDataRef.current) return;
-    lastSentDataRef.current = dataHash;
-    setIsSyncing(true);
+  useEffect(
+    () => () => {
+      if (retryTimeoutRef.current !== null) window.clearTimeout(retryTimeoutRef.current);
+      abortRef.current?.abort();
+    },
+    [],
+  );
+
+  const [retryTick, setRetryTick] = useState(0);
+
+  // Push the email reference pack whenever the selection or the mailbox changes.
+  // This does not wait on the mailbox cache-settling timer: `selected` comes
+  // straight off the thread query, so an opened email is sent as soon as it loads.
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const tracker = trackerRef.current;
+    tracker.setScope(scopeId);
+    tracker.setSelection(selected?.threadId ?? null);
+
+    // The sidebar renders on the settings routes too, where there is neither a
+    // folder to describe nor an email open. Keep the last context rather than
+    // overwriting it with an empty one.
+    if (!snapshot.folder && !selected) return;
+
+    const pack = buildEmailContextPack({
+      snapshot,
+      selected,
+      revision: tracker.getRevision(),
+      scopeId,
+    });
+
+    const ticket = tracker.beginSend(pack.text);
+    if (!ticket) return;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setContextStatus('syncing');
+
+    const finish = (delivered: boolean, ticketForResult: SendTicket) => {
+      // A reply for a superseded send must not report on the current selection.
+      const current = tracker.isCurrent(ticketForResult);
+      tracker.completeSend(ticketForResult, delivered);
+      if (!current) return;
+      setContextStatus(delivered ? 'idle' : 'failed');
+      if (delivered) return;
+      const delay = tracker.retryDelayMs();
+      if (delay === null) return;
+      if (retryTimeoutRef.current !== null) window.clearTimeout(retryTimeoutRef.current);
+      retryTimeoutRef.current = window.setTimeout(() => setRetryTick((tick) => tick + 1), delay);
+    };
 
     fetch(`${workerUrl}/api/external-data`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      signal: controller.signal,
       body: JSON.stringify({
-        mermaidCode: summary,
+        mermaidCode: pack.text,
         diagramImage: '',
-        prompt: formatMailboxPrompt(snapshot),
+        prompt: pack.prompt,
         type: 'email',
         sessionId,
       }),
     })
       .then((response) => {
-        setIsSyncing(false);
-        if (!response.ok) {
-          console.error('Failed to send mailbox context to Hexa:', response.status);
-          lastSentDataRef.current = null;
-        }
+        if (!response.ok) console.error('Failed to send email context to Hexa:', response.status);
+        finish(response.ok, ticket);
       })
       .catch((error) => {
-        setIsSyncing(false);
-        console.error('Error sending mailbox context to Hexa:', error);
-        lastSentDataRef.current = null;
+        if (controller.signal.aborted) {
+          // Superseded by a newer selection; the newer send owns the status.
+          tracker.completeSend(ticket, false);
+          return;
+        }
+        console.error('Error sending email context to Hexa:', error);
+        finish(false, ticket);
       });
-  }, [snapshot, sessionId, workerUrl]);
+  }, [snapshot, selected, scopeId, sessionId, workerUrl, retryTick]);
+
+  const handleImageRequest = useCallback(
+    async (hint: string | undefined, question: string | undefined): Promise<string> => {
+      const tracker = trackerRef.current;
+      const current = selectedRef.current;
+      if (!current || current.status !== 'ready' || !current.newest) {
+        return NO_EMAIL_OPEN_MESSAGE;
+      }
+
+      const selectionTicket = tracker.beginSelectionRequest();
+      try {
+        const result = (await describeThreadImages({
+          threadId: current.threadId,
+          messageId: current.newest.id,
+          hint,
+          question,
+        })) as ImageAnalysisResult;
+
+        // The user may have moved on while the model was looking at the picture.
+        if (!tracker.isSelectionCurrent(selectionTicket)) return STALE_IMAGE_RESULT_MESSAGE;
+        if (result.threadId !== selectionTicket.threadId) return STALE_IMAGE_RESULT_MESSAGE;
+        return formatImageAnalysisReply(result);
+      } catch (error) {
+        console.error('Email image analysis failed:', error);
+        return 'That image could not be analyzed just now. Say so rather than guessing what it shows.';
+      }
+    },
+    [describeThreadImages],
+  );
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -130,6 +235,24 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
         case 'IFRAME_READY':
           if (event.data.sessionId === sessionId) configureIframe();
           break;
+        case 'HEXA_APP_ACTION_REQUEST': {
+          const { requestId, action } = event.data;
+          if (event.data.sessionId !== sessionId) break;
+          if (!requestId || action?.name !== 'describe_email_image') break;
+          void handleImageRequest(action.imageHint, action.question).then((message) => {
+            iframeRef.current?.contentWindow?.postMessage(
+              {
+                type: 'HEXA_APP_ACTION_RESULT',
+                requestId,
+                sessionId,
+                success: true,
+                message,
+              },
+              workerOrigin,
+            );
+          });
+          break;
+        }
         case 'HEXA_PRESENTATION_STATE':
           if (
             event.data.source === 'hexa-presentation-state' &&
@@ -153,11 +276,17 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [workerOrigin, configureIframe, sessionId]);
+  }, [workerOrigin, configureIframe, sessionId, handleImageRequest]);
 
-  const status = isSyncing
-    ? 'Syncing mailbox...'
-    : `${snapshot.threads.length} email${snapshot.threads.length === 1 ? '' : 's'} in context`;
+  const status = useMemo(() => {
+    if (contextStatus === 'failed') return 'Email context not delivered - retrying';
+    if (contextStatus === 'syncing') return 'Updating context...';
+    if (selected?.status === 'loading') return 'Loading the open email...';
+    if (selected?.status === 'error') return 'Open email unavailable';
+    if (selected?.status === 'ready') return 'Open email in context';
+    const count = snapshot.threads.length;
+    return `${count} email${count === 1 ? '' : 's'} in context`;
+  }, [contextStatus, selected?.status, snapshot.threads.length]);
 
   return (
     <section className="hexa-panel border-sidebar-border bg-panelLight dark:bg-panelDark border" aria-label="Voice assistant">

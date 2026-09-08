@@ -10,6 +10,7 @@
     "types": "wrangler types",
     "deploy": "pnpm build && wrangler deploy",
     "lint": "eslint .",
+    "test": "node --import tsx --test \"lib/__tests__/*.test.ts\"",
     "machine-translate": "inlang machine translate --project project.inlang"
   },
   "dependencies": {

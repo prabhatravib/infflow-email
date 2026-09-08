@@ -1,18 +1,30 @@
 import {
   IGetThreadResponseSchema,
   IGetThreadsResponseSchema,
+  type IGetThreadResponse,
   type IGetThreadsResponse,
 } from '../../lib/driver/types';
 
-import { activeDriverProcedure, router, privateProcedure } from '../trpc';
+import {
+  analyzeResolvedImage,
+  MAX_IMAGES_PER_REQUEST,
+  resolveImage,
+  selectImagesForRequest,
+  type ImageAnalysis,
+} from '../../lib/email-image-analysis';
+import { activeDriverProcedure, createRateLimiterMiddleware, router, privateProcedure } from '../trpc';
+import { defaultUserSettings, serializedFileSchema, type UserSettings } from '../../lib/schemas';
+import { getZeroAgent, getZeroDB } from '../../lib/server-utils';
+import { extractEmailImages } from '../../lib/email-reference';
 import { processEmailHtml } from '../../lib/email-processor';
 import { defaultPageSize, FOLDERS } from '../../lib/utils';
-import { serializedFileSchema } from '../../lib/schemas';
 import type { DeleteAllSpamResponse } from '../../types';
-import { getZeroAgent } from '../../lib/server-utils';
 
+import { Ratelimit } from '@upstash/ratelimit';
 import { env } from 'cloudflare:workers';
+import { openai } from '@ai-sdk/openai';
 import { TRPCError } from '@trpc/server';
+import { generateText } from 'ai';
 import { z } from 'zod';
 
 const senderSchema = z.object({
@@ -579,5 +591,130 @@ export const mailRouter = router({
           message: 'Failed to process email content',
         });
       }
+    }),
+  /**
+   * Looks at pictures inside one message, on request only.
+   *
+   * The caller passes a thread, a message and a hint - never a URL - so the set of
+   * images this can ever reach is exactly the set the message already contains.
+   * Attachment bytes are fetched with the user's own credentials here on the
+   * server; remote images honour the same privacy setting the reading pane does.
+   */
+  describeThreadImages: activeDriverProcedure
+    .use(
+      createRateLimiterMiddleware({
+        limiter: Ratelimit.slidingWindow(20, '1m'),
+        generatePrefix: ({ sessionUser }) => `ratelimit:describe-thread-images-${sessionUser?.id}`,
+      }),
+    )
+    .input(
+      z.object({
+        threadId: z.string().min(1),
+        messageId: z.string().optional(),
+        question: z.string().max(300).optional(),
+        hint: z.string().max(200).optional(),
+        maxImages: z.number().int().min(1).max(MAX_IMAGES_PER_REQUEST).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { activeConnection, sessionUser } = ctx;
+      const agent = await getZeroAgent(activeConnection.id);
+
+      const thread = (await agent.getThread(input.threadId, false)) as IGetThreadResponse;
+      const messages = (thread.messages ?? []).filter((message) => !message.isDraft);
+      const message = input.messageId
+        ? messages.find((candidate) => candidate.id === input.messageId)
+        : messages[messages.length - 1];
+
+      if (!message) {
+        return {
+          threadId: input.threadId,
+          messageId: input.messageId ?? null,
+          analyses: [],
+          failures: [],
+          notes: ['That message is not part of the open conversation.'],
+        };
+      }
+
+      const images = extractEmailImages(message.decodedBody, message.attachments ?? []);
+      if (images.length === 0) {
+        return {
+          threadId: input.threadId,
+          messageId: message.id,
+          analyses: [],
+          failures: [],
+          notes: ['This message contains no images.'],
+        };
+      }
+
+      const db = await getZeroDB(sessionUser.id);
+      const stored = (await db.findUserSettings()) as { settings?: Partial<UserSettings> } | null;
+      const settings = { ...defaultUserSettings, ...(stored?.settings ?? {}) };
+      const senderEmail = message.sender?.email ?? '';
+      const allowRemoteImages =
+        !!settings.externalImages ||
+        (!!senderEmail && !!settings.trustedSenders?.includes(senderEmail));
+
+      // Attachment bodies are not in the thread payload; fetch them once, lazily.
+      type AttachmentBody = { attachmentId: string; body: string; mimeType: string };
+      let attachmentCache: AttachmentBody[] | null = null;
+      const getAttachmentBody = async (attachmentId: string) => {
+        if (!attachmentCache) {
+          attachmentCache = ((await agent.getMessageAttachments(message.id)) ??
+            []) as AttachmentBody[];
+        }
+        const found = attachmentCache.find((entry) => entry.attachmentId === attachmentId);
+        return found ? { body: found.body, mimeType: found.mimeType } : null;
+      };
+
+      const selected = selectImagesForRequest(images, input.hint, input.maxImages);
+      const analyses: ImageAnalysis[] = [];
+      const failures: { ref: string; filename?: string; reason: string }[] = [];
+
+      for (const image of selected) {
+        const resolved = await resolveImage(image, { getAttachmentBody, allowRemoteImages });
+        if ('reason' in resolved) {
+          failures.push({ ref: image.ref, filename: image.filename, reason: resolved.reason });
+          continue;
+        }
+        try {
+          analyses.push(
+            await analyzeResolvedImage(resolved, image, input.question ?? 'What does this show?', {
+              generate: async ({ system, mimeType, bytes, question }) => {
+                const { text } = await generateText({
+                  model: openai(env.OPENAI_MODEL || 'gpt-4o'),
+                  system,
+                  maxTokens: 700,
+                  messages: [
+                    {
+                      role: 'user',
+                      content: [
+                        { type: 'text', text: question },
+                        { type: 'image', image: bytes, mimeType },
+                      ],
+                    },
+                  ],
+                });
+                return text;
+              },
+            }),
+          );
+        } catch (error) {
+          console.error('Failed to analyze email image:', error);
+          failures.push({
+            ref: image.ref,
+            filename: image.filename,
+            reason: 'the image could not be analyzed',
+          });
+        }
+      }
+
+      const notes: string[] = [];
+      if (images.length > selected.length) {
+        notes.push(
+          `${images.length} images are present; ${selected.length} were looked at for this question.`,
+        );
+      }
+      return { threadId: input.threadId, messageId: message.id, analyses, failures, notes };
     }),
 });
