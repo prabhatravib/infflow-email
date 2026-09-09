@@ -1,19 +1,21 @@
-import { buildEmailContextPack, type SelectedEmailContext } from '@/lib/hexa-email-context';
 import {
   formatImageAnalysisReply,
   NO_EMAIL_OPEN_MESSAGE,
   STALE_IMAGE_RESULT_MESSAGE,
   type ImageAnalysisResult,
 } from '@/lib/hexa-email-image-reply';
+import { buildEmailContextPack, type SelectedEmailContext } from '@/lib/hexa-email-context';
 import { EmailContextTracker, type SendTicket } from '@/lib/hexa-email-delivery';
+import { areLogsVisible, hexaLogsOverrideSearch } from '@/lib/log-visibility';
 import { useSelectedEmailContext } from '@/hooks/use-selected-email-context';
+import { downloadConsoleLogsForSession } from '@/lib/console-log-capture';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMailboxSnapshot } from '@/hooks/use-mailbox-snapshot';
+import { HEXA_WORKER_URL } from '@/lib/hexa-worker-url';
 import { useTRPC } from '@/providers/query-provider';
-import { sessionManager } from '@/lib/hexa-session';
 import { useMutation } from '@tanstack/react-query';
-
-const DEFAULT_HEXA_WORKER_URL = 'https://hexa-worker-v2.prabhatravib.workers.dev';
+import { sessionManager } from '@/lib/hexa-session';
+import { Download } from 'lucide-react';
 
 /** Reapply the layout once the embedded app has registered its listener. */
 const IFRAME_SETUP_DELAYS_MS = [400, 1200];
@@ -38,8 +40,7 @@ type ContextStatus = 'idle' | 'syncing' | 'failed';
  * Adapted from infflow-calendar (calendar-worker/web/src/components/HexaWorker.tsx).
  */
 export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
-  const workerUrl =
-    hexaWorkerUrl ?? import.meta.env.VITE_PUBLIC_HEXA_WORKER_URL ?? DEFAULT_HEXA_WORKER_URL;
+  const workerUrl = hexaWorkerUrl ?? HEXA_WORKER_URL;
   const workerOrigin = useMemo(() => new URL(workerUrl).origin, [workerUrl]);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -107,6 +108,17 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
     setSessionId(sessionManager.getSessionId() ?? sessionManager.generateSessionId());
     return unsubscribe;
   }, []);
+
+  // Resolved after mount rather than during render: log visibility is a
+  // browser-only decision, and reading it while the server renders would make
+  // the two passes disagree.
+  const [showLogButton, setShowLogButton] = useState(false);
+  useEffect(() => setShowLogButton(areLogsVisible()), []);
+
+  const handleDownloadConsoleLogs = useCallback(
+    () => downloadConsoleLogsForSession(sessionId),
+    [sessionId],
+  );
 
   // A replacement session starts with no stored record, so everything the
   // assistant was told has to be delivered again.
@@ -289,7 +301,10 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
   }, [contextStatus, selected?.status, snapshot.threads.length]);
 
   return (
-    <section className="hexa-panel border-sidebar-border bg-panelLight dark:bg-panelDark border" aria-label="Voice assistant">
+    <section
+      className="hexa-panel border-sidebar-border bg-panelLight dark:bg-panelDark border"
+      aria-label="Voice assistant"
+    >
       <div className="hexa-panel__header border-sidebar-border border-b">
         <div className="min-w-0">
           <h2 className="text-sidebar-foreground truncate text-sm font-semibold">Voice Pane</h2>
@@ -297,28 +312,41 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
             {status}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => sessionManager.generateSessionId()}
-          className="hexa-panel__reset"
-          title="Reset voice connection"
-          aria-label="Reset voice connection"
-          disabled={!sessionId}
-        >
-          <svg
-            className="h-4 w-4"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
+        <div className="hexa-panel__actions">
+          {showLogButton && (
+            <button
+              type="button"
+              onClick={handleDownloadConsoleLogs}
+              className="hexa-panel__action"
+              title="Download Infflow Email and Hexa console logs"
+              aria-label="Download Infflow Email and Hexa console logs"
+            >
+              <Download className="h-4 w-4" aria-hidden="true" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => sessionManager.generateSessionId()}
+            className="hexa-panel__reset"
+            title="Reset voice connection"
+            aria-label="Reset voice connection"
+            disabled={!sessionId}
           >
-            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-            <path d="M3 3v5h5" />
-          </svg>
-        </button>
+            <svg
+              className="h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+            </svg>
+          </button>
+        </div>
       </div>
       <div className="hexa-panel__body">
         {sessionId ? (
@@ -330,7 +358,11 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
             // reader sees the hexagon rather than a blurred progress bar and the
             // first Voice ON is instant. The microphone is untouched until they
             // tap the pill.
-            src={`${workerUrl}/enhancedMode?showChat=true&sessionId=${encodeURIComponent(sessionId)}&iframe=true&curtains=true&voice=off&prewarm=true`}
+            // `hexaLogsOverrideSearch()` is appended, not posted after load, so
+            // the setting is in force before Hexa's first log line. It is frozen
+            // at page load for the same reason the key is the session id: a new
+            // src would remount the iframe and drop the voice session.
+            src={`${workerUrl}/enhancedMode?showChat=true&sessionId=${encodeURIComponent(sessionId)}&iframe=true&curtains=true&voice=off&prewarm=true${hexaLogsOverrideSearch()}`}
             className="hexa-panel__frame"
             allow="microphone; autoplay"
             title="Voice assistant - hexagon and transcript"

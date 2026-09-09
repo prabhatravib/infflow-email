@@ -423,6 +423,13 @@
   padding: 0.5rem 0.75rem;
 }
 
+.hexa-panel__actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 0.375rem;
+}
+
 .hexa-panel__reset {
   display: grid;
   place-items: center;
@@ -435,6 +442,38 @@
   background: #006ffe;
   color: #ffffff;
   cursor: pointer;
+}
+
+/* Log download: a debugging affordance, so it sits quietly next to the reset
+   button rather than competing with it. */
+.hexa-panel__action {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 9999px;
+  background: transparent;
+  color: currentColor;
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+.hexa-panel__action:hover {
+  background: rgb(0 0 0 / 0.06);
+  opacity: 1;
+}
+
+.dark .hexa-panel__action:hover {
+  background: rgb(255 255 255 / 0.1);
+}
+
+.hexa-panel__action:focus-visible {
+  outline: 2px solid #006ffe;
+  outline-offset: 2px;
+  opacity: 1;
 }
 
 .hexa-panel__reset:hover {

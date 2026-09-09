@@ -19,7 +19,7 @@ import { useCategorySettings, useDefaultCategoryId } from '@/hooks/use-categorie
 import { ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { useCommandPalette } from '../context/command-palette-context';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, RefreshCcw } from 'lucide-react';
+import { Check, ChevronDown, PanelRightOpen, RefreshCcw } from 'lucide-react';
 
 import { ThreadDisplay } from '@/components/mail/thread-display';
 import { useActiveConnection } from '@/hooks/use-connections';
@@ -380,6 +380,10 @@ export const defaultLabels = [
 //   );
 // };
 
+const EMAIL_GROUPS_PANEL_KEY = 'email-groups-panel-open';
+// Matches SIDEBAR_WIDTH (20rem) so the right panel mirrors the left sidebar.
+const EMAIL_GROUPS_PANEL_WIDTH = 'w-[20rem]';
+
 export function MailLayout() {
   const params = useParams<{ folder: string }>();
   const folder = params?.folder ?? 'inbox';
@@ -397,6 +401,19 @@ export function MailLayout() {
   // Email groups state
   const [selectedGroupId, setSelectedGroupId] = useQueryState('selectedGroupId');
   const { emailGroups, totalEmails, totalGroups, isLoading: emailGroupsLoading, isFetching: emailGroupsFetching, triggerCategorization, isCategorizing, categorizationComplete, pendingResults } = useEmailGroups();
+
+  // Email groups side panel open/closed, persisted across sessions
+  const [isGroupsPanelOpen, setIsGroupsPanelOpen] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    return localStorage.getItem(EMAIL_GROUPS_PANEL_KEY) !== 'false';
+  });
+
+  const toggleGroupsPanel = useCallback((open: boolean) => {
+    setIsGroupsPanelOpen(open);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(EMAIL_GROUPS_PANEL_KEY, open ? 'true' : 'false');
+    }
+  }, []);
 
   // Handle group selection
   const handleGroupSelect = (groupId: string | null) => {
@@ -473,27 +490,12 @@ export function MailLayout() {
   return (
     <TooltipProvider delayDuration={0}>
       <PricingDialog />
-      <div className="rounded-inherit relative z-[5] flex flex-col p-0 md:mr-0.5 md:mt-1">
-        {/* Email Groups Section */}
-        <div className="h-80 mb-2">
-          <EmailGroups
-            groups={emailGroups}
-            selectedGroupId={selectedGroupId}
-            onGroupSelect={handleGroupSelect}
-            totalGroups={totalGroups}
-            totalEmails={totalEmails}
-            onCategorizeEmails={triggerCategorization}
-            isCategorizing={isCategorizing}
-            categorizationComplete={categorizationComplete}
-            pendingResults={pendingResults}
-          />
-        </div>
-        
+      <div className="rounded-inherit relative z-[5] flex flex-row p-0 md:mr-0.5 md:mt-1">
         {/* Main Mail Interface */}
         <ResizablePanelGroup
           direction="horizontal"
           autoSaveId="mail-panel-layout"
-          className="rounded-inherit overflow-hidden"
+          className="rounded-inherit min-w-0 flex-1 overflow-hidden"
         >
           <ResizablePanel
             defaultSize={35}
@@ -651,6 +653,47 @@ export function MailLayout() {
 
           {activeConnection?.id ? <AISidebar /> : null}
         </ResizablePanelGroup>
+
+        {/* Email Groups Panel (right side, collapsible) */}
+        {isGroupsPanelOpen ? (
+          <div
+            className={cn(
+              'bg-panelLight dark:bg-panelDark mb-1 ml-1 hidden h-[calc(100dvh-8px)] shrink-0 overflow-hidden rounded-2xl shadow-sm md:block',
+              EMAIL_GROUPS_PANEL_WIDTH,
+            )}
+          >
+            <EmailGroups
+              groups={emailGroups}
+              selectedGroupId={selectedGroupId}
+              onGroupSelect={handleGroupSelect}
+              totalGroups={totalGroups}
+              totalEmails={totalEmails}
+              onCategorizeEmails={triggerCategorization}
+              isCategorizing={isCategorizing}
+              categorizationComplete={categorizationComplete}
+              pendingResults={pendingResults}
+              onClose={() => toggleGroupsPanel(false)}
+            />
+          </div>
+        ) : (
+          <div className="mb-1 ml-1 hidden h-[calc(100dvh-8px)] w-9 shrink-0 md:block">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => toggleGroupsPanel(true)}
+                  aria-label="Open email groups panel"
+                  className="bg-panelLight dark:bg-panelDark flex h-full w-full flex-col items-center gap-3 rounded-2xl pt-3 shadow-sm transition-colors hover:bg-[#f0f7ff] dark:hover:bg-[#252525]"
+                >
+                  <PanelRightOpen className="h-4 w-4 shrink-0 text-[#4a8dd9]" />
+                  <span className="text-xs font-medium text-[#5a7ba8] [writing-mode:vertical-rl]">
+                    Email Groups
+                  </span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="left">Open email groups</TooltipContent>
+            </Tooltip>
+          </div>
+        )}
       </div>
     </TooltipProvider>
   );
