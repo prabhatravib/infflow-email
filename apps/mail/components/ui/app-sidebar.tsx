@@ -6,6 +6,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader } from '@/components/ui/sidebar';
+import { ConsoleLogDownloadButton } from '@/components/ui/console-log-download-button';
 import { navigationConfig, bottomNavItems } from '@/config/navigation';
 import React, { useMemo, useState } from 'react';
 import { useSession } from '@/lib/auth-client';
@@ -115,7 +116,18 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           )}
 
           <SidebarFooter className={`px-0 pb-0 ${state === 'collapsed' ? 'md:px-2' : 'md:px-4'}`}>
-            <NavMain items={bottomNavItems} />
+            {/* The log download sits on the settings row, not in the voice pane
+                header: it is a debugging affordance rather than a voice control.
+                Hidden while collapsed, where the rail is only wide enough for
+                the icon nav — the same rule the voice pane above follows. The
+                button's `mb-2` matches the nav group's own bottom padding so
+                the two centres line up. */}
+            <div className="flex items-center gap-1">
+              <div className="min-w-0 flex-1">
+                <NavMain items={bottomNavItems} />
+              </div>
+              {state !== 'collapsed' && <ConsoleLogDownloadButton className="mb-2" />}
+            </div>
           </SidebarFooter>
         </Sidebar>
       )}

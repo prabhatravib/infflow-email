@@ -6,16 +6,14 @@ import {
 } from '@/lib/hexa-email-image-reply';
 import { buildEmailContextPack, type SelectedEmailContext } from '@/lib/hexa-email-context';
 import { EmailContextTracker, type SendTicket } from '@/lib/hexa-email-delivery';
-import { areLogsVisible, hexaLogsOverrideSearch } from '@/lib/log-visibility';
 import { useSelectedEmailContext } from '@/hooks/use-selected-email-context';
-import { downloadConsoleLogsForSession } from '@/lib/console-log-capture';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { hexaLogsOverrideSearch } from '@/lib/log-visibility';
 import { useMailboxSnapshot } from '@/hooks/use-mailbox-snapshot';
 import { HEXA_WORKER_URL } from '@/lib/hexa-worker-url';
 import { useTRPC } from '@/providers/query-provider';
 import { useMutation } from '@tanstack/react-query';
 import { sessionManager } from '@/lib/hexa-session';
-import { Download } from 'lucide-react';
 
 /** Reapply the layout once the embedded app has registered its listener. */
 const IFRAME_SETUP_DELAYS_MS = [400, 1200];
@@ -108,17 +106,6 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
     setSessionId(sessionManager.getSessionId() ?? sessionManager.generateSessionId());
     return unsubscribe;
   }, []);
-
-  // Resolved after mount rather than during render: log visibility is a
-  // browser-only decision, and reading it while the server renders would make
-  // the two passes disagree.
-  const [showLogButton, setShowLogButton] = useState(false);
-  useEffect(() => setShowLogButton(areLogsVisible()), []);
-
-  const handleDownloadConsoleLogs = useCallback(
-    () => downloadConsoleLogsForSession(sessionId),
-    [sessionId],
-  );
 
   // A replacement session starts with no stored record, so everything the
   // assistant was told has to be delivered again.
@@ -313,17 +300,6 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
           </p>
         </div>
         <div className="hexa-panel__actions">
-          {showLogButton && (
-            <button
-              type="button"
-              onClick={handleDownloadConsoleLogs}
-              className="hexa-panel__action"
-              title="Download Infflow Email and Hexa console logs"
-              aria-label="Download Infflow Email and Hexa console logs"
-            >
-              <Download className="h-4 w-4" aria-hidden="true" />
-            </button>
-          )}
           <button
             type="button"
             onClick={() => sessionManager.generateSessionId()}

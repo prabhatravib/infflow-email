@@ -444,9 +444,9 @@
   cursor: pointer;
 }
 
-/* Log download: a debugging affordance, so it sits quietly next to the reset
-   button rather than competing with it. */
-.hexa-panel__action {
+/* Log download: a debugging affordance, so it sits quietly beside the sidebar's
+   settings button rather than competing with it. */
+.console-log-download {
   display: grid;
   place-items: center;
   flex-shrink: 0;
@@ -461,16 +461,16 @@
   cursor: pointer;
 }
 
-.hexa-panel__action:hover {
+.console-log-download:hover {
   background: rgb(0 0 0 / 0.06);
   opacity: 1;
 }
 
-.dark .hexa-panel__action:hover {
+.dark .console-log-download:hover {
   background: rgb(255 255 255 / 0.1);
 }
 
-.hexa-panel__action:focus-visible {
+.console-log-download:focus-visible {
   outline: 2px solid #006ffe;
   outline-offset: 2px;
   opacity: 1;
