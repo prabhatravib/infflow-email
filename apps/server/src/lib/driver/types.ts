@@ -20,6 +20,70 @@ export const IGetThreadResponseSchema = z.object({
   labels: z.array(z.object({ id: z.string(), name: z.string() })),
 });
 
+/**
+ * The subset of a thread the inbox list and the Hexa mailbox overview actually
+ * render: sender, subject, date, recipients and label state. No message bodies,
+ * no attachments. Gmail serves all of it from `format: 'metadata'`, which is a
+ * fraction of the payload of the `format: 'full'` fetch `get` performs -- the
+ * list discards every body it currently downloads.
+ */
+export interface IThreadHeader {
+  id: string;
+  latest?: {
+    id: string;
+    threadId: string;
+    sender: { name?: string; email: string };
+    subject: string;
+    receivedOn: string;
+    to: { name?: string; email: string }[];
+    tags: { id: string; name: string; type: string }[];
+    unread: boolean;
+  };
+  hasUnread: boolean;
+  /** The thread holds an unsent draft, so the row shows the draft badge. */
+  hasDraft: boolean;
+  /** More than one recipient across to/cc/bcc, so the row shows the group avatar. */
+  isGroupThread: boolean;
+  labels: { id: string; name: string }[];
+  totalReplies: number;
+}
+
+const PersonSchema = z.object({
+  name: z.string().optional(),
+  email: z.string(),
+});
+
+export const IThreadHeaderSchema = z.object({
+  id: z.string(),
+  latest: z
+    .object({
+      id: z.string(),
+      threadId: z.string(),
+      sender: PersonSchema,
+      subject: z.string(),
+      receivedOn: z.string(),
+      to: z.array(PersonSchema),
+      tags: z.array(z.object({ id: z.string(), name: z.string(), type: z.string() })),
+      unread: z.boolean(),
+    })
+    .optional(),
+  hasUnread: z.boolean(),
+  hasDraft: z.boolean(),
+  isGroupThread: z.boolean(),
+  labels: z.array(z.object({ id: z.string(), name: z.string() })),
+  totalReplies: z.number(),
+});
+
+export const IThreadHeadersResponseSchema = z.array(IThreadHeaderSchema);
+
+/**
+ * Ids per `listThreadHeaders` call. The client chunks a page of the list to this
+ * size and the driver batches within it, which keeps one request well inside the
+ * Worker's outbound subrequest budget while still collapsing a 100-thread page
+ * into a handful of round trips instead of one per row.
+ */
+export const MAX_THREAD_HEADER_IDS = 25;
+
 export interface ParsedDraft {
   id: string;
   to?: string[];
@@ -63,6 +127,7 @@ export interface MailManager {
     }[]
   >;
   get(id: string): Promise<IGetThreadResponse>;
+  getThreadHeaders(ids: string[]): Promise<IThreadHeader[]>;
   create(data: IOutgoingMessage): Promise<{ id?: string | null }>;
   sendDraft(id: string, data: IOutgoingMessage): Promise<void>;
   createDraft(

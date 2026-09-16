@@ -334,11 +334,21 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
             // reader sees the hexagon rather than a blurred progress bar and the
             // first Voice ON is instant. The microphone is untouched until they
             // tap the pill.
+            // `curtainsStart=both` is what makes it arrive *covered*. This pane
+            // wants both regions hidden to begin with, and the
+            // SET_NARRATOR_PRESENTATION in `configureIframe` can only say so
+            // once the frame has loaded — necessarily too late, so the hexagon
+            // and the transcript painted in full and were covered a beat later.
+            // On the URL the seed is known before Hexa's first render, so the
+            // curtains are there from the start and the voice app boots behind
+            // them. The message still matters: it is what restores the reader's
+            // own choices into a replaced iframe after a connection reset, and
+            // a seed deliberately does not override it.
             // `hexaLogsOverrideSearch()` is appended, not posted after load, so
             // the setting is in force before Hexa's first log line. It is frozen
             // at page load for the same reason the key is the session id: a new
             // src would remount the iframe and drop the voice session.
-            src={`${workerUrl}/enhancedMode?showChat=true&sessionId=${encodeURIComponent(sessionId)}&iframe=true&curtains=true&voice=off&prewarm=true${hexaLogsOverrideSearch()}`}
+            src={`${workerUrl}/enhancedMode?showChat=true&sessionId=${encodeURIComponent(sessionId)}&iframe=true&curtains=true&curtainsStart=both&voice=off&prewarm=true${hexaLogsOverrideSearch()}`}
             className="hexa-panel__frame"
             allow="microphone; autoplay"
             title="Voice assistant - hexagon and transcript"

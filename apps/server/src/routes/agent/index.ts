@@ -43,9 +43,9 @@ import { withRetry } from '../../lib/gmail-rate-limit';
 import { getPrompt } from '../../pipelines.effect';
 import { AIChatAgent } from 'agents/ai-chat-agent';
 import { ToolOrchestrator } from './orchestrator';
+import { connection } from '../../db/schema-d1';
 import { getPromptName } from '../../pipelines';
 import { anthropic } from '@ai-sdk/anthropic';
-import { connection } from '../../db/schema-d1';
 import type { WSMessage } from 'partyserver';
 import { tools as authTools } from './tools';
 import { processToolCalls } from './utils';
@@ -302,7 +302,10 @@ export class ZeroDriver extends AIChatAgent<typeof env> {
       // Fallback to direct SQL execution
       return this.ctx.storage.sql(strings, ...values);
     } catch (error) {
-      if (error instanceof Error && (error.message.includes('SQLite storage') || error.message.includes('no such table'))) {
+      if (
+        error instanceof Error &&
+        (error.message.includes('SQLite storage') || error.message.includes('no such table'))
+      ) {
         console.warn('SQLite not available, skipping SQL operation:', error.message);
         // Return appropriate fallback based on the query
         const query = strings.join('?');
@@ -620,10 +623,10 @@ export class ZeroDriver extends AIChatAgent<typeof env> {
         // Try to get connection from D1 database first using direct SQL
         if (env.DB) {
           console.log('[setupAuth] Trying to get connection from D1 database...');
-          const result = await env.DB.prepare(
-            'SELECT * FROM mail0_connection WHERE id = ?'
-          ).bind(this.name).first();
-          
+          const result = await env.DB.prepare('SELECT * FROM mail0_connection WHERE id = ?')
+            .bind(this.name)
+            .first();
+
           if (result) {
             console.log('[setupAuth] Found connection in D1 database:', result.id);
             console.log('[setupAuth] D1 connection data:', {
@@ -632,7 +635,7 @@ export class ZeroDriver extends AIChatAgent<typeof env> {
               refreshToken: result.refresh_token ? 'SET' : 'NULL',
               scope: result.scope,
             });
-            
+
             // Check if required tokens are present
             if (!result.access_token || !result.refresh_token) {
               console.error('[setupAuth] Connection missing required tokens:', {
@@ -642,7 +645,7 @@ export class ZeroDriver extends AIChatAgent<typeof env> {
               });
               throw new Error(`Connection ${result.id} is missing required tokens`);
             }
-            
+
             // Convert the D1 result to the expected format
             const _connection = {
               id: result.id,
@@ -691,7 +694,7 @@ export class ZeroDriver extends AIChatAgent<typeof env> {
           }
           this.ctx.waitUntil(conn.end());
         }
-        
+
         const threadCount = await this.getThreadCount();
         if (threadCount < maxCount) {
           this.ctx.waitUntil(this.syncThreads('inbox'));
@@ -712,24 +715,27 @@ export class ZeroDriver extends AIChatAgent<typeof env> {
     pageToken?: string;
   }): Promise<IGetThreadsResponse> {
     console.log('[rawListThreads] Starting with params:', params);
-    
+
     if (!this.driver) {
       console.error('[rawListThreads] No driver available');
       throw new Error('No driver available');
     }
-    
+
     console.log('[rawListThreads] Driver available, calling driver.list');
     const result = await this.driver.list(params);
-    
+
     console.log('[rawListThreads] Driver.list result:', result);
     console.log('[rawListThreads] Result type:', typeof result);
-    console.log('[rawListThreads] Result is null/undefined:', result === null || result === undefined);
-    
+    console.log(
+      '[rawListThreads] Result is null/undefined:',
+      result === null || result === undefined,
+    );
+
     if (result === null || result === undefined) {
       console.error('[rawListThreads] Driver.list returned null/undefined');
       throw new Error('Driver.list returned null or undefined');
     }
-    
+
     return result;
   }
 
@@ -738,6 +744,18 @@ export class ZeroDriver extends AIChatAgent<typeof env> {
       throw new Error('No driver available');
     }
     return await this.getThreadFromDB(threadId, includeDrafts);
+  }
+
+  /**
+   * Header-only projection for the inbox list. Deliberately not routed through
+   * `getThreadFromDB`/`getWithRetry`: those exist to fetch and retry whole
+   * threads, and the point of this path is never to pull a body at all.
+   */
+  async getThreadHeaders(threadIds: string[]) {
+    if (!this.driver) {
+      throw new Error('No driver available');
+    }
+    return await this.driver.getThreadHeaders(threadIds);
   }
 
   //   async markThreadsRead(threadIds: string[]) {
@@ -1523,7 +1541,7 @@ export class ZeroDriver extends AIChatAgent<typeof env> {
       if (!this.driver) {
         throw new Error('No driver available');
       }
-      
+
       // Use the driver's modifyLabels method instead
       return await this.driver.modifyLabels([threadId], {
         addLabels,
@@ -1619,7 +1637,10 @@ export class ZeroAgent extends AIChatAgent<typeof env> {
     try {
       return super.sql(strings, ...values);
     } catch (error) {
-      if (error instanceof Error && (error.message.includes('SQLite storage') || error.message.includes('no such table'))) {
+      if (
+        error instanceof Error &&
+        (error.message.includes('SQLite storage') || error.message.includes('no such table'))
+      ) {
         console.warn('SQLite not available, skipping SQL operation:', error.message);
         return [] as T[];
       }

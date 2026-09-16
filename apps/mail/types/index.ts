@@ -109,9 +109,16 @@ export interface MailListProps {
 
 export type MailSelectMode = 'mass' | 'range' | 'single' | 'selectAllBelow';
 
+/**
+ * What a list row can identify itself by when clicked. The row renders from
+ * headers and never holds a full `ParsedMessage`, and the click path only ever
+ * read these three fields off one.
+ */
+export type ThreadClickTarget = Pick<ParsedMessage, 'id' | 'threadId' | 'unread'>;
+
 export type ThreadProps = {
   message: { id: string; historyId?: string | null };
-  onClick?: (message: ParsedMessage) => () => void;
+  onClick?: (message: ThreadClickTarget) => () => void;
   isKeyboardFocused?: boolean;
 };
 

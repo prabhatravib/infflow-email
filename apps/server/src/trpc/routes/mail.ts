@@ -1,6 +1,8 @@
 import {
   IGetThreadResponseSchema,
   IGetThreadsResponseSchema,
+  IThreadHeadersResponseSchema,
+  MAX_THREAD_HEADER_IDS,
   type IGetThreadResponse,
   type IGetThreadsResponse,
 } from '../../lib/driver/types';
@@ -12,7 +14,12 @@ import {
   selectImagesForRequest,
   type ImageAnalysis,
 } from '../../lib/email-image-analysis';
-import { activeDriverProcedure, createRateLimiterMiddleware, router, privateProcedure } from '../trpc';
+import {
+  activeDriverProcedure,
+  createRateLimiterMiddleware,
+  router,
+  privateProcedure,
+} from '../trpc';
 import { defaultUserSettings, serializedFileSchema, type UserSettings } from '../../lib/schemas';
 import { getZeroAgent, getZeroDB } from '../../lib/server-utils';
 import { extractEmailImages } from '../../lib/email-reference';
@@ -22,8 +29,8 @@ import type { DeleteAllSpamResponse } from '../../types';
 
 import { Ratelimit } from '@upstash/ratelimit';
 import { env } from 'cloudflare:workers';
-import { openai } from '@ai-sdk/openai';
 import { TRPCError } from '@trpc/server';
+import { openai } from '@ai-sdk/openai';
 import { generateText } from 'ai';
 import { z } from 'zod';
 
@@ -53,6 +60,28 @@ export const mailRouter = router({
       const { activeConnection } = ctx;
       const agent = await getZeroAgent(activeConnection.id);
       return await agent.getThread(input.id, true);
+    }),
+  /**
+   * Sender, subject, date and label state for a page of threads -- everything the
+   * inbox list renders and everything the Hexa mailbox overview reads. Rows used
+   * to get this from `get`, which fetches the entire thread including every
+   * message body, then discarded all of it.
+   *
+   * Takes a batch of ids so one page of the list costs a handful of requests
+   * instead of one per row.
+   */
+  listThreadHeaders: activeDriverProcedure
+    .input(
+      z.object({
+        ids: z.array(z.string()).max(MAX_THREAD_HEADER_IDS),
+      }),
+    )
+    .output(IThreadHeadersResponseSchema)
+    .query(async ({ input, ctx }) => {
+      if (!input.ids.length) return [];
+      const { activeConnection } = ctx;
+      const agent = await getZeroAgent(activeConnection.id);
+      return await agent.getThreadHeaders(input.ids);
     }),
   count: activeDriverProcedure
     .output(
@@ -99,7 +128,7 @@ export const mailRouter = router({
             maxResults,
             pageToken: cursor,
           });
-          
+
           const drafts = await Promise.race([draftsPromise, timeoutPromise]);
           console.debug('[listThreads] Drafts result:', drafts);
           return drafts;
@@ -138,14 +167,17 @@ export const mailRouter = router({
           console.error('[listThreads] Error stack:', rawListError.stack);
           throw rawListError;
         }
-        
+
         console.log('Threads fetched:', threadsResponse); // <--- ADD THIS FOR DEBUGGING
 
         if (folder === FOLDERS.SNOOZED) {
           const nowTs = Date.now();
           const filtered: ThreadItem[] = [];
 
-          console.debug('[listThreads] Filtering snoozed threads at', new Date(nowTs).toISOString());
+          console.debug(
+            '[listThreads] Filtering snoozed threads at',
+            new Date(nowTs).toISOString(),
+          );
 
           await Promise.all(
             threadsResponse.threads.map(async (t: ThreadItem) => {
@@ -189,7 +221,7 @@ export const mailRouter = router({
         console.error('[listThreads] Error stack:', error.stack);
         console.error('[listThreads] Error name:', error.name);
         console.error('[listThreads] Error message:', error.message);
-        
+
         // Return empty response instead of throwing for better UX
         return {
           threads: [],
@@ -429,14 +461,11 @@ export const mailRouter = router({
       const agent = await getZeroAgent(activeConnection.id);
       const { draftId, ...mail } = input;
 
-
-
       if (draftId) {
         await agent.sendDraft(draftId, mail);
       } else {
         await agent.create(input);
       }
-
 
       return { success: true };
     }),

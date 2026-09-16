@@ -4,17 +4,18 @@ import {
   type MailboxThread,
 } from '@/lib/hexa-mailbox-context';
 import { categorizationResultsAtom } from '@/store/categorization';
-import { useEffect, useMemo, useState } from 'react';
+import { threadHeadersAtom } from '@/store/thread-headers';
 import { useQueryClient } from '@tanstack/react-query';
 import { useTRPC } from '@/providers/query-provider';
+import { useEffect, useMemo, useState } from 'react';
 import { useStats } from '@/hooks/use-stats';
 import { useLocation } from 'react-router';
 import { useAtomValue } from 'jotai';
 
 /**
- * The mail list fills the `mail.get` cache one row at a time as threads mount,
- * so the cache settles in bursts. Re-read on the trailing edge instead of on
- * every individual write.
+ * Thread ids still come from the folder's cached `listThreads` pages, which
+ * arrive a page at a time. Re-read on the trailing edge rather than on every
+ * write to the query cache.
  */
 const CACHE_SETTLE_MS = 1500;
 
@@ -26,11 +27,16 @@ interface CachedThreadListing {
 /**
  * Reads the mailbox the user is already looking at, without issuing a single
  * request of its own: thread ids come from the folder's cached `listThreads`
- * pages and headers from the `mail.get` entries the list rows populated. A
- * thread the list has not rendered yet simply does not appear.
+ * pages and the rest from the headers the list fetched in batches. A thread
+ * whose headers have not arrived yet simply does not appear.
+ *
+ * This used to scavenge the `mail.get` cache, which meant the overview could
+ * only describe threads that had been rendered -- and made the assistant's view
+ * of the mailbox a side effect of how far the user had scrolled.
  */
 export const useMailboxSnapshot = (): MailboxSnapshot => {
   const categorizationResults = useAtomValue(categorizationResultsAtom);
+  const threadHeaders = useAtomValue(threadHeadersAtom);
   const queryClient = useQueryClient();
   const { data: stats } = useStats();
   const location = useLocation();
@@ -74,22 +80,27 @@ export const useMailboxSnapshot = (): MailboxSnapshot => {
       })
       .sort((a, b) => b.state.dataUpdatedAt - a.state.dataUpdatedAt)[0];
 
-    const threadIds: string[] = ((listing?.state.data as CachedThreadListing | undefined)?.pages ?? [])
+    const threadIds: string[] = (
+      (listing?.state.data as CachedThreadListing | undefined)?.pages ?? []
+    )
       .flatMap((page) => page?.threads ?? [])
       .map((thread) => thread?.id)
       .filter(Boolean);
 
     const threads: MailboxThread[] = [];
     for (const id of threadIds) {
-      const cached = queryClient.getQueryData(trpc.mail.get.queryKey({ id }));
-      const latest = cached?.latest;
+      const header = threadHeaders.get(id);
+      const latest = header?.latest;
       if (!latest) continue;
       threads.push({
         id,
-        sender: latest.sender?.name?.trim().replace(/^['"]|['"]$/g, '') || latest.sender?.email || 'Unknown sender',
+        sender:
+          latest.sender?.name?.trim().replace(/^['"]|['"]$/g, '') ||
+          latest.sender?.email ||
+          'Unknown sender',
         subject: latest.subject || '(no subject)',
         receivedOn: latest.receivedOn ?? '',
-        unread: cached.hasUnread ?? latest.unread ?? false,
+        unread: header?.hasUnread ?? latest.unread ?? false,
         categories: categorizationResults.get(id) ?? [],
       });
     }
@@ -117,5 +128,5 @@ export const useMailboxSnapshot = (): MailboxSnapshot => {
     // `cacheVersion` is the read trigger: the cache mutates in place, so nothing
     // else in this list changes when new thread headers land.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folder, stats, categorizationResults, cacheVersion, queryClient, trpc]);
+  }, [folder, stats, categorizationResults, threadHeaders, cacheVersion, queryClient, trpc]);
 };

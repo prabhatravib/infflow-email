@@ -7,21 +7,22 @@ import {
   PencilCompose,
 } from '../icons/icons';
 import { memo, useCallback, useEffect, useMemo, useRef, type ComponentProps } from 'react';
+import { useHydrateThreadHeaders, useThreadHeader } from '@/hooks/use-thread-headers';
 import { useOptimisticThreadState } from '@/components/mail/optimistic-thread-state';
 import { focusedIndexAtom, useMailNavigation } from '@/hooks/use-mail-navigation';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import type { MailSelectMode, ThreadClickTarget, ThreadProps } from '@/types';
 import { useIsFetching, type UseQueryResult } from '@tanstack/react-query';
-import type { MailSelectMode, ParsedMessage, ThreadProps } from '@/types';
 import type { ParsedDraft } from '../../../server/src/lib/driver/types';
 import { ThreadContextMenu } from '@/components/context/thread-context';
 import { useOptimisticActions } from '@/hooks/use-optimistic-actions';
 import { useMail, type Config } from '@/components/mail/use-mail';
 import { type ThreadDestination } from '@/lib/thread-actions';
-import { useThread, useThreads } from '@/hooks/use-threads';
 import { useSearchValue } from '@/hooks/use-search-value';
 import { EmptyStateIcon } from '../icons/empty-state-svg';
 import { highlightText } from '@/lib/email-utils.client';
 import { cn, FOLDERS, formatDate } from '@/lib/utils';
+import { useThreads } from '@/hooks/use-threads';
 import { Avatar } from '../ui/avatar';
 
 import { useTRPC } from '@/providers/query-provider';
@@ -46,6 +47,23 @@ import { useQueryState } from 'nuqs';
 import { Categories } from './mail';
 import { useAtom } from 'jotai';
 
+/** Same height as a loaded thread row, so a row keeps its slot while its headers load. */
+const ThreadPlaceholder = () => (
+  <div className="border-b md:my-1 md:border-none" aria-hidden="true">
+    <div className="mx-1 flex items-center gap-4 rounded-lg px-4 py-2">
+      <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
+      <div className="flex w-full flex-col">
+        <div className="flex h-5 items-center justify-between">
+          <Skeleton className="h-3.5 w-1/3" />
+          <Skeleton className="h-3 w-12" />
+        </div>
+        <div className="mt-1 flex h-5 items-center">
+          <Skeleton className="h-3.5 w-2/3" />
+        </div>
+      </div>
+    </div>
+  </div>
+);
 
 const Thread = memo(
   function Thread({
@@ -58,82 +76,82 @@ const Thread = memo(
     const { folder } = useParams<{ folder: string }>();
     const [, threads] = useThreads();
     const [threadId] = useQueryState('threadId');
-    const { data: getThreadData, isGroupThread, latestDraft } = useThread(message.id);
+    // Headers only. The row renders sender, subject, date and label state; it has
+    // never rendered a body, so it no longer pays for one. The full thread is
+    // fetched by the reading pane when this row is clicked.
+    const { header: getThreadData, latest: latestMessage, isPending } = useThreadHeader(message.id);
+    const isGroupThread = getThreadData?.isGroupThread ?? false;
     const [id, setThreadId] = useQueryState('threadId');
     const [focusedIndex, setFocusedIndex] = useAtom(focusedIndexAtom);
 
-    const { latestMessage, idToUse, cleanName } = useMemo(() => {
-      const latestMessage = getThreadData?.latest;
+    const { idToUse, cleanName } = useMemo(() => {
       const idToUse = latestMessage?.threadId ?? latestMessage?.id;
       const cleanName = latestMessage?.sender?.name
         ? latestMessage.sender.name.trim().replace(/^['"]|['"]$/g, '')
         : '';
 
-      return { latestMessage, idToUse, cleanName };
-    }, [getThreadData?.latest]);
+      return { idToUse, cleanName };
+    }, [latestMessage]);
 
     const optimisticState = useOptimisticThreadState(idToUse ?? '');
 
-    const { displayStarred, displayImportant, displayUnread, optimisticLabels, emailContent } =
-      useMemo(() => {
-        const emailContent = getThreadData?.latest?.body;
-        const displayStarred =
-          optimisticState.optimisticStarred !== null
-            ? optimisticState.optimisticStarred
-            : (getThreadData?.latest?.tags?.some((tag) => tag.name === 'STARRED') ?? false);
+    const { displayStarred, displayImportant, displayUnread, optimisticLabels } = useMemo(() => {
+      const displayStarred =
+        optimisticState.optimisticStarred !== null
+          ? optimisticState.optimisticStarred
+          : (getThreadData?.latest?.tags?.some((tag) => tag.name === 'STARRED') ?? false);
 
-        const displayImportant =
-          optimisticState.optimisticImportant !== null
-            ? optimisticState.optimisticImportant
-            : (getThreadData?.latest?.tags?.some((tag) => tag.name === 'IMPORTANT') ?? false);
+      const displayImportant =
+        optimisticState.optimisticImportant !== null
+          ? optimisticState.optimisticImportant
+          : (getThreadData?.latest?.tags?.some((tag) => tag.name === 'IMPORTANT') ?? false);
 
-        const displayUnread =
-          optimisticState.optimisticRead !== null
-            ? !optimisticState.optimisticRead
-            : (getThreadData?.hasUnread ?? false);
+      const displayUnread =
+        optimisticState.optimisticRead !== null
+          ? !optimisticState.optimisticRead
+          : (getThreadData?.hasUnread ?? false);
 
-        let labels: { id: string; name: string }[] = [];
-        if (getThreadData?.labels) {
-          labels = [...getThreadData.labels];
-          const hasStarredLabel = labels.some((label) => label.name === 'STARRED');
+      let labels: { id: string; name: string }[] = [];
+      if (getThreadData?.labels) {
+        labels = [...getThreadData.labels];
+        const hasStarredLabel = labels.some((label) => label.name === 'STARRED');
 
-          if (optimisticState.optimisticStarred !== null) {
-            if (optimisticState.optimisticStarred && !hasStarredLabel) {
-              labels.push({ id: 'starred-optimistic', name: 'STARRED' });
-            } else if (!optimisticState.optimisticStarred && hasStarredLabel) {
-              labels = labels.filter((label) => label.name !== 'STARRED');
-            }
-          }
-
-          if (optimisticState.optimisticLabels) {
-            labels = labels.filter(
-              (label) => !optimisticState.optimisticLabels.removedLabelIds.includes(label.id),
-            );
-
-            optimisticState.optimisticLabels.addedLabelIds.forEach((labelId) => {
-              if (!labels.some((label) => label.id === labelId)) {
-                labels.push({ id: labelId, name: labelId });
-              }
-            });
+        if (optimisticState.optimisticStarred !== null) {
+          if (optimisticState.optimisticStarred && !hasStarredLabel) {
+            labels.push({ id: 'starred-optimistic', name: 'STARRED' });
+          } else if (!optimisticState.optimisticStarred && hasStarredLabel) {
+            labels = labels.filter((label) => label.name !== 'STARRED');
           }
         }
 
-        return {
-          displayStarred,
-          displayImportant,
-          displayUnread,
-          optimisticLabels: labels,
-          emailContent,
-        };
-      }, [
-        optimisticState.optimisticStarred,
-        optimisticState.optimisticImportant,
-        optimisticState.optimisticRead,
-        getThreadData?.latest?.tags,
-        getThreadData?.hasUnread,
-        getThreadData?.labels,
-        optimisticState.optimisticLabels,
-      ]);
+        if (optimisticState.optimisticLabels) {
+          labels = labels.filter(
+            (label) => !optimisticState.optimisticLabels.removedLabelIds.includes(label.id),
+          );
+
+          optimisticState.optimisticLabels.addedLabelIds.forEach((labelId) => {
+            if (!labels.some((label) => label.id === labelId)) {
+              labels.push({ id: labelId, name: labelId });
+            }
+          });
+        }
+      }
+
+      return {
+        displayStarred,
+        displayImportant,
+        displayUnread,
+        optimisticLabels: labels,
+      };
+    }, [
+      optimisticState.optimisticStarred,
+      optimisticState.optimisticImportant,
+      optimisticState.optimisticRead,
+      getThreadData?.latest?.tags,
+      getThreadData?.hasUnread,
+      getThreadData?.labels,
+      optimisticState.optimisticLabels,
+    ]);
 
     const { optimisticToggleStar, optimisticToggleImportant, optimisticMoveThreadsTo } =
       useOptimisticActions();
@@ -208,9 +226,7 @@ const Thread = memo(
     );
 
     // Check if thread has a draft
-    const hasDraft = useMemo(() => {
-      return !!latestDraft;
-    }, [latestDraft]);
+    const hasDraft = getThreadData?.hasDraft ?? false;
 
     const content = useMemo(() => {
       if (!latestMessage || !getThreadData) return null;
@@ -500,11 +516,6 @@ const Thread = memo(
                       </div>
                     )}
                   </div>
-                  {emailContent && (
-                    <div className="text-muted-foreground mt-2 line-clamp-2 text-xs">
-                      {highlightText(emailContent, searchValue.highlight)}
-                    </div>
-                  )}
                   {/* {mainSearchTerm && (
                     <div className="text-muted-foreground mt-1 flex items-center gap-1 text-xs">
                       <span className="bg-primary/10 text-primary rounded px-1.5 py-0.5">
@@ -535,9 +546,11 @@ const Thread = memo(
       isMailBulkSelected,
       threadLabels,
       optimisticLabels,
-      emailContent,
     ]);
 
+    // A row with nothing in it measures 0px in the virtual list, so rows whose headers
+    // arrive early would take the top of the inbox and newer ones would pop in above
+    // them one at a time. Hold the slot until this row's own request settles.
     return latestMessage ? (
       !optimisticState.shouldHide && idToUse ? (
         <ThreadContextMenu
@@ -550,6 +563,8 @@ const Thread = memo(
           {content}
         </ThreadContextMenu>
       ) : null
+    ) : isPending ? (
+      <ThreadPlaceholder />
     ) : null;
   },
   (prev, next) => {
@@ -670,10 +685,27 @@ export const MailList = memo(
     const [, setDraftId] = useQueryState('draftId');
     const [category, setCategory] = useQueryState('category');
     const [searchValue, setSearchValue] = useSearchValue();
-    const [{ refetch, isLoading, isFetching, isFetchingNextPage, hasNextPage }, items, , loadMore] =
-      useThreads();
+    const [
+      { refetch, isLoading, isFetching, isFetchingNextPage, hasNextPage, data: threadPages },
+      items,
+      ,
+      loadMore,
+    ] = useThreads();
     const trpc = useTRPC();
-    const isFetchingMail = useIsFetching({ queryKey: trpc.mail.get.queryKey() }) > 0;
+    // Headers are fetched for the whole listing, not just the rows that survive a
+    // group filter: the Hexa mailbox overview reads the folder as listed.
+    const listedThreadIds = useMemo(
+      () =>
+        (threadPages?.pages ?? [])
+          .flatMap((page) => page?.threads ?? [])
+          .map((thread) => thread?.id)
+          .filter((id): id is string => !!id),
+      [threadPages],
+    );
+    useHydrateThreadHeaders(listedThreadIds);
+    // Guards the next page from being requested while this one's rows are still
+    // filling in. That used to mean `mail.get`, which the rows no longer call.
+    const isFetchingMail = useIsFetching({ queryKey: trpc.mail.listThreadHeaders.queryKey() }) > 0;
     const itemsRef = useRef(items);
     const parentRef = useRef<HTMLDivElement>(null);
     const vListRef = useRef<VListHandle>(null);
@@ -757,7 +789,7 @@ export const MailList = memo(
     const [, setMail] = useMail();
 
     const handleSelectMail = useCallback(
-      (message: ParsedMessage) => {
+      (message: ThreadClickTarget) => {
         const itemId = message.threadId ?? message.id;
         const currentMode = getSelectMode();
         console.log('Selection mode:', currentMode, 'for item:', itemId);
@@ -808,7 +840,7 @@ export const MailList = memo(
 
     const { optimisticMarkAsRead } = useOptimisticActions();
     const handleMailClick = useCallback(
-      (message: ParsedMessage) => async () => {
+      (message: ThreadClickTarget) => async () => {
         const mode = getSelectMode();
         const autoRead = settingsData?.settings?.autoRead ?? true;
         console.log('Mail click with mode:', mode);
@@ -925,7 +957,6 @@ export const MailList = memo(
                         clear filters
                       </button>
                     </p>
-
                   </div>
                 </div>
               </div>

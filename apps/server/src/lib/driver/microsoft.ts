@@ -12,13 +12,16 @@ import type {
   User,
 } from '@microsoft/microsoft-graph-types';
 import type { IOutgoingMessage, Label, ParsedMessage } from '../../types';
+import type { IThreadHeader, MailManager, ManagerConfig } from './types';
 import { sanitizeTipTapHtml } from '../sanitize-tip-tap-html';
 import { Client } from '@microsoft/microsoft-graph-client';
-import type { MailManager, ManagerConfig } from './types';
 import { getContext } from 'hono/context-storage';
 import type { CreateDraftData } from '../schemas';
 import type { HonoContext } from '../../ctx';
 import * as he from 'he';
+
+/** Outbound requests per batch, bounded by the Worker subrequest ceiling. */
+const THREAD_HEADER_CHUNK_SIZE = 15;
 
 export class OutlookMailManager implements MailManager {
   private graphClient: Client;
@@ -417,6 +420,74 @@ export class OutlookMailManager implements MailManager {
       { id, email: this.config.auth?.email },
     );
   }
+  /**
+   * Headers only, for the inbox list and the Hexa mailbox overview. The `$select`
+   * deliberately omits `body` and `attachments`, which are the expensive halves
+   * of `get`. Graph is queried one message at a time in bounded chunks; a message
+   * that fails is dropped rather than failing the whole page.
+   */
+  public getThreadHeaders(ids: string[]) {
+    return this.withErrorHandler(
+      'getThreadHeaders',
+      async () => {
+        const headers: IThreadHeader[] = [];
+
+        for (let i = 0; i < ids.length; i += THREAD_HEADER_CHUNK_SIZE) {
+          const chunk = ids.slice(i, i + THREAD_HEADER_CHUNK_SIZE);
+          const settled = await Promise.allSettled(
+            chunk.map(async (id) => {
+              const message: Message = await this.graphClient
+                .api(`/me/messages/${id}`)
+                .select(
+                  'id,conversationId,subject,bodyPreview,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,internetMessageId,categories',
+                )
+                .get();
+              return { id, message };
+            }),
+          );
+
+          for (const result of settled) {
+            if (result.status === 'rejected') {
+              console.error('[getThreadHeaders] Failed to load a message header:', result.reason);
+              continue;
+            }
+            const { id, message } = result.value;
+            if (!message) continue;
+
+            const parsed = this.parseOutlookMessage(message);
+            const recipientCount = [
+              ...(parsed.to ?? []),
+              ...(parsed.cc ?? []),
+              ...(parsed.bcc ?? []),
+            ].length;
+
+            headers.push({
+              id,
+              latest: {
+                id: parsed.id,
+                threadId: parsed.threadId || id,
+                sender: parsed.sender,
+                subject: parsed.subject,
+                receivedOn: parsed.receivedOn,
+                to: parsed.to ?? [],
+                tags: parsed.tags ?? [],
+                unread: parsed.unread,
+              },
+              hasUnread: parsed.unread,
+              hasDraft: !!parsed.isDraft,
+              isGroupThread: recipientCount > 1,
+              labels: parsed.tags ?? [],
+              totalReplies: 1,
+            });
+          }
+        }
+
+        return headers;
+      },
+      { count: ids.length, email: this.config.auth?.email },
+    );
+  }
+
   public create(data: IOutgoingMessage) {
     return this.withErrorHandler(
       'create',

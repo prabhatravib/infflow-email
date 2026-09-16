@@ -28,10 +28,11 @@ import { useOptimisticActions } from '@/hooks/use-optimistic-actions';
 import { ExclamationCircle, Mail, Clock } from '../icons/icons';
 import { SnoozeDialog } from '@/components/mail/snooze-dialog';
 import { type ThreadDestination } from '@/lib/thread-actions';
-import { useThread, useThreads } from '@/hooks/use-threads';
+import { useThreadHeader } from '@/hooks/use-thread-headers';
 import { useMemo, type ReactNode, useState } from 'react';
 import { useTRPC } from '@/providers/query-provider';
 import { useMutation } from '@tanstack/react-query';
+import { useThreads } from '@/hooks/use-threads';
 import { useLabels } from '@/hooks/use-labels';
 import { FOLDERS, LABELS } from '@/lib/utils';
 import { useMail } from '../mail/use-mail';
@@ -66,7 +67,7 @@ const LabelsList = ({ threadId, bulkSelected }: { threadId: string; bulkSelected
   const { optimisticToggleLabel } = useOptimisticActions();
   const targetThreadIds = bulkSelected.length > 0 ? bulkSelected : [threadId];
 
-  const { data: thread } = useThread(threadId);
+  const { header: thread } = useThreadHeader(threadId);
   const rightClickedThreadOptimisticState = useOptimisticThreadState(threadId);
 
   if (!labels || !thread) return null;
@@ -144,7 +145,9 @@ export function ThreadContextMenu({
   const isSnoozedFolder = currentFolder === FOLDERS.SNOOZED;
   const [, setMode] = useQueryState('mode');
   const [, setThreadId] = useQueryState('threadId');
-  const { data: threadData } = useThread(threadId);
+  // Wraps every row, so this must stay on headers: a `useThread` here would put
+  // a full-thread fetch back on the list, one per row, whatever the row reads.
+  const { header: threadData } = useThreadHeader(threadId);
   const [, setActiveReplyId] = useQueryState('activeReplyId');
   const optimisticState = useOptimisticThreadState(threadId);
   const trpc = useTRPC();
@@ -167,18 +170,14 @@ export function ThreadContextMenu({
     if (optimisticState.optimisticStarred !== null) {
       starred = optimisticState.optimisticStarred;
     } else {
-      starred = threadData?.messages.some((message) =>
-        message.tags?.some((tag) => tag.name.toLowerCase() === 'starred'),
-      );
+      starred = threadData?.labels.some((label) => label.name.toLowerCase() === 'starred');
     }
 
     let important;
     if (optimisticState.optimisticImportant !== null) {
       important = optimisticState.optimisticImportant;
     } else {
-      important = threadData?.messages.some((message) =>
-        message.tags?.some((tag) => tag.name.toLowerCase() === 'important'),
-      );
+      important = threadData?.labels.some((label) => label.name.toLowerCase() === 'important');
     }
 
     return { isUnread: unread, isStarred: starred, isImportant: important };

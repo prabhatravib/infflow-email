@@ -11,8 +11,8 @@ import {
 import { mapGoogleLabelColor, mapToGoogleLabelColor } from './google-label-color-map';
 import { parseAddressList, parseFrom, wasSentWithTLS } from '../email-utils';
 import type { IOutgoingMessage, Label, ParsedMessage } from '../../types';
+import type { IThreadHeader, MailManager, ManagerConfig } from './types';
 import { sanitizeTipTapHtml } from '../sanitize-tip-tap-html';
-import type { MailManager, ManagerConfig } from './types';
 import { type gmail_v1, gmail } from '@googleapis/gmail';
 import { OAuth2Client } from 'google-auth-library';
 import type { CreateDraftData } from '../schemas';
@@ -22,6 +22,31 @@ import { cleanSearchValue } from '../utils';
 import { env } from 'cloudflare:workers';
 import { Effect } from 'effect';
 import * as he from 'he';
+
+/**
+ * The only headers the inbox list and the mailbox overview read. Narrowing the
+ * set is what keeps a metadata fetch small; `X-SimpleLogin-Original-From` is
+ * included because `parse` prefers it over `From` when present, and omitting it
+ * would silently change which sender a row displays.
+ */
+const THREAD_HEADER_FIELDS = [
+  'From',
+  'To',
+  'Cc',
+  'Bcc',
+  'Subject',
+  'Date',
+  'X-SimpleLogin-Original-From',
+];
+
+/** Outbound requests per batch, bounded by the Worker subrequest ceiling. */
+const THREAD_HEADER_CHUNK_SIZE = 15;
+
+/** Pause between batches, to stay under Gmail's per-user rate limit. */
+const THREAD_HEADER_GAP_MS = 100;
+
+/** Backoff before the single retry pass over threads that failed. */
+const THREAD_HEADER_RETRY_MS = 500;
 
 export class GoogleMailManager implements MailManager {
   private auth;
@@ -505,6 +530,127 @@ export class GoogleMailManager implements MailManager {
       },
       { id, email: this.config.auth?.email },
     );
+  }
+  /**
+   * Headers only, for the inbox list and the Hexa mailbox overview.
+   *
+   * `format: 'metadata'` returns the same labelIds and the headers named below
+   * but no MIME body, so nothing here decodes HTML, walks attachment parts or
+   * inlines `cid:` images the way `get` must. `parse` is reused unchanged: it
+   * reads headers, labelIds and the snippet, all of which metadata provides.
+   *
+   * Requests run in chunks because a Worker has a ceiling on outbound
+   * subrequests per invocation and Gmail rate-limits per user; a thread that
+   * fails is dropped rather than failing the page, so one bad id cannot blank
+   * the inbox.
+   */
+  public getThreadHeaders(ids: string[]) {
+    return this.withErrorHandler(
+      'getThreadHeaders',
+      async () => {
+        const headers = new Map<string, IThreadHeader>();
+
+        const fetchChunk = async (chunk: string[]) => {
+          const settled = await Promise.allSettled(
+            chunk.map(async (id) => {
+              const res = await this.gmail.users.threads.get({
+                userId: 'me',
+                id,
+                format: 'metadata',
+                metadataHeaders: THREAD_HEADER_FIELDS,
+                quotaUser: this.getQuotaUser(),
+              });
+              return { id, messages: res.data.messages ?? [] };
+            }),
+          );
+
+          const failed: string[] = [];
+          settled.forEach((result, index) => {
+            if (result.status === 'rejected') {
+              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+              failed.push(chunk[index]!);
+              return;
+            }
+            headers.set(
+              result.value.id,
+              this.toThreadHeader(result.value.id, result.value.messages),
+            );
+          });
+          return failed;
+        };
+
+        const runPasses = async (candidates: string[]) => {
+          const failed: string[] = [];
+          for (let i = 0; i < candidates.length; i += THREAD_HEADER_CHUNK_SIZE) {
+            if (i > 0) await new Promise((resolve) => setTimeout(resolve, THREAD_HEADER_GAP_MS));
+            failed.push(...(await fetchChunk(candidates.slice(i, i + THREAD_HEADER_CHUNK_SIZE))));
+          }
+          return failed;
+        };
+
+        // A thread that fails is retried once before being dropped. Dropping is
+        // not cosmetic here: the list treats a thread it asked for and did not
+        // get as unavailable and renders no row for it, so a transient rate-limit
+        // would otherwise punch holes in the inbox until the next refetch.
+        const failed = await runPasses(ids);
+        if (failed.length) {
+          console.warn(`[getThreadHeaders] Retrying ${failed.length} thread header(s)`);
+          await new Promise((resolve) => setTimeout(resolve, THREAD_HEADER_RETRY_MS));
+          const stillFailed = await runPasses(failed);
+          if (stillFailed.length) {
+            console.error(`[getThreadHeaders] Gave up on ${stillFailed.length} thread header(s)`);
+          }
+        }
+
+        // Returned in the order asked for, so the list is not reordered by which
+        // threads happened to need a retry.
+        return ids
+          .map((id) => headers.get(id))
+          .filter((header): header is IThreadHeader => !!header);
+      },
+      { count: ids.length, email: this.config.auth?.email },
+    );
+  }
+
+  /** Shapes one thread's metadata messages into the row/overview projection. */
+  private toThreadHeader(id: string, messages: gmail_v1.Schema$Message[]): IThreadHeader {
+    const parsed = messages.map((message) => this.parse(message));
+    const sent = parsed.filter((message) => !message.isDraft);
+    const latest = sent[sent.length - 1];
+
+    const labels = new Set<string>();
+    for (const message of parsed) {
+      for (const tag of message.tags ?? []) {
+        if (tag.id) labels.add(tag.id);
+      }
+    }
+
+    // Matches `useThread`'s rule so the avatar does not change when the full
+    // thread replaces these headers: more than one recipient overall.
+    const recipientCount = latest
+      ? [...(latest.to ?? []), ...(latest.cc ?? []), ...(latest.bcc ?? [])].length
+      : 0;
+
+    return {
+      id,
+      latest: latest
+        ? {
+            id: latest.id,
+            threadId: latest.threadId || id,
+            sender: latest.sender,
+            subject: latest.subject,
+            receivedOn: latest.receivedOn,
+            to: latest.to ?? [],
+            tags: latest.tags ?? [],
+            unread: latest.unread,
+          }
+        : undefined,
+      hasUnread: parsed.some((message) => message.unread),
+      hasDraft: parsed.some((message) => message.isDraft),
+      isGroupThread: recipientCount > 1,
+      labels: Array.from(labels).map((labelId) => ({ id: labelId, name: labelId })),
+      totalReplies: sent.length,
+    };
   }
   public create(data: IOutgoingMessage) {
     return this.withErrorHandler(
