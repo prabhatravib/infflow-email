@@ -23,7 +23,7 @@ import { type EProviders } from '../types';
 import type { HonoContext } from '../ctx';
 import { env } from 'cloudflare:workers';
 import { createDriver } from './driver';
-import { createDb } from '../db';
+import { createDb, type DB } from '../db';
 import * as schema from '../db/schema-d1';
 import { Effect } from 'effect';
 
@@ -334,35 +334,55 @@ export const connectionHandlerHook = async (account: Account) => {
     try {
       // Import database directly to avoid RPC entirely
       const { createDb } = await import('../db');
-      const { db } = createDb();
+      // Always the D1 branch here (no Hyperdrive connection string), so narrow
+      // away the Postgres half of createDb's return union.
+      const db = createDb().db as DB;
       const { connection } = await import('../db/schema-d1');
-      
+      const { and, eq } = await import('drizzle-orm');
+
       console.log('Direct database approach - creating connection with tokens:', {
         accessTokenLength: rpcConnectionData.accessToken.length,
         refreshTokenLength: rpcConnectionData.refreshToken.length,
         scopeLength: rpcConnectionData.scope.length,
       });
-      
-      const connectionId = crypto.randomUUID();
-      
-      // Insert directly into database - NO RPC INVOLVED
-      await db.insert(connection).values({
-        id: connectionId,
-        userId: account.userId,
+
+      // A re-login for an account we already hold must refresh that connection,
+      // not add a second one - otherwise the account switcher grows a new entry
+      // on every sign in and the app keeps reading the oldest (stale) tokens.
+      const existingConnection = await db.query.connection.findFirst({
+        where: and(
+          eq(connection.userId, account.userId),
+          eq(connection.email, userInfo.address),
+        ),
+        columns: { id: true },
+      });
+
+      const connectionId = existingConnection?.id ?? crypto.randomUUID();
+      const credentials = {
         providerId: account.providerId as EProviders,
-        email: userInfo.address,
         accessToken: rpcConnectionData.accessToken,
         refreshToken: rpcConnectionData.refreshToken,
         scope: rpcConnectionData.scope,
         expiresAt: rpcConnectionData.expiresAt,
         name: rpcConnectionData.name,
         picture: rpcConnectionData.picture,
-        createdAt: new Date(),
         updatedAt: new Date(),
-      });
-      
-      console.log('DIRECT DATABASE CONNECTION CREATED SUCCESSFULLY:', connectionId);
-      
+      };
+
+      if (existingConnection) {
+        await db.update(connection).set(credentials).where(eq(connection.id, connectionId));
+        console.log('DIRECT DATABASE CONNECTION REFRESHED SUCCESSFULLY:', connectionId);
+      } else {
+        await db.insert(connection).values({
+          id: connectionId,
+          userId: account.userId,
+          email: userInfo.address,
+          createdAt: new Date(),
+          ...credentials,
+        });
+        console.log('DIRECT DATABASE CONNECTION CREATED SUCCESSFULLY:', connectionId);
+      }
+
       const result = { id: connectionId };
       
       if (env.NODE_ENV === 'production') {

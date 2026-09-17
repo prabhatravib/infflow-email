@@ -4,6 +4,7 @@ import {
   integer,
   real,
   blob,
+  uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 import { defaultUserSettings } from '../lib/schemas';
 
@@ -54,22 +55,28 @@ export const account = createTable('account', {
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });
 
-export const connection = createTable('connection', {
-  id: text('id').primaryKey(),
-  providerId: text('provider_id').notNull(),
-  email: text('email').notNull(),
-  userId: text('user_id')
-    .notNull()
-    .references(() => user.id, { onDelete: 'cascade' }),
-  name: text('name'),
-  picture: text('picture'),
-  accessToken: text('access_token'),
-  refreshToken: text('refresh_token'),
-  scope: text('scope'),
-  expiresAt: integer('expires_at', { mode: 'timestamp' }),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-});
+export const connection = createTable(
+  'connection',
+  {
+    id: text('id').primaryKey(),
+    providerId: text('provider_id').notNull(),
+    email: text('email').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    name: text('name'),
+    picture: text('picture'),
+    accessToken: text('access_token'),
+    refreshToken: text('refresh_token'),
+    scope: text('scope'),
+    expiresAt: integer('expires_at', { mode: 'timestamp' }),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  },
+  // One row per mailbox per user, as in the Postgres schema: a re-login must
+  // refresh the existing connection rather than add another account entry.
+  (t) => [uniqueIndex('connection_user_id_email_unique').on(t.userId, t.email)],
+);
 
 export const userSettings = createTable('user_settings', {
   id: text('id').primaryKey(),

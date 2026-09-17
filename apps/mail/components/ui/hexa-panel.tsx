@@ -4,12 +4,13 @@ import {
   STALE_IMAGE_RESULT_MESSAGE,
   type ImageAnalysisResult,
 } from '@/lib/hexa-email-image-reply';
+import { HEXAGON_SPLIT_MIN_PERCENT, resolveHexagonSplitPercent } from '@/lib/hexa-layout-split';
 import { buildEmailContextPack, type SelectedEmailContext } from '@/lib/hexa-email-context';
 import { EmailContextTracker, type SendTicket } from '@/lib/hexa-email-delivery';
 import { useSelectedEmailContext } from '@/hooks/use-selected-email-context';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { hexaLogsOverrideSearch } from '@/lib/log-visibility';
 import { useMailboxSnapshot } from '@/hooks/use-mailbox-snapshot';
+import { hexaLogsOverrideSearch } from '@/lib/log-visibility';
 import { HEXA_WORKER_URL } from '@/lib/hexa-worker-url';
 import { useTRPC } from '@/providers/query-provider';
 import { useMutation } from '@tanstack/react-query';
@@ -48,6 +49,7 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
   const retryTimeoutRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const presentationRef = useRef({ visualHidden: true, transcriptHidden: true });
+  const hexagonSplitRef = useRef(HEXAGON_SPLIT_MIN_PERCENT);
   const trackerRef = useRef(new EmailContextTracker());
 
   const snapshot = useMailboxSnapshot();
@@ -62,20 +64,27 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
   const selectedRef = useRef<SelectedEmailContext | null>(selected);
   selectedRef.current = selected;
 
+  const postLayoutSplit = useCallback(
+    (hexagonHeight: number) => {
+      iframeRef.current?.contentWindow?.postMessage(
+        {
+          type: 'SET_LAYOUT_SPLIT',
+          hexagonHeight,
+          chatHeight: 100 - hexagonHeight,
+          hideHexagon: false,
+          compactHexagon: true,
+        },
+        workerOrigin,
+      );
+    },
+    [workerOrigin],
+  );
+
   const configureIframe = useCallback(() => {
     const frame = iframeRef.current?.contentWindow;
     if (!frame) return;
 
-    frame.postMessage(
-      {
-        type: 'SET_LAYOUT_SPLIT',
-        hexagonHeight: 40,
-        chatHeight: 60,
-        hideHexagon: false,
-        compactHexagon: true,
-      },
-      workerOrigin,
-    );
+    postLayoutSplit(hexagonSplitRef.current);
     frame.postMessage({ type: 'SET_ASPECT_COUNT', aspectCount: 0 }, workerOrigin);
     // Seed a fresh iframe, then let Hexa's native controls own visibility. The
     // snapshot also preserves the user's choices after a connection reset.
@@ -83,7 +92,36 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
       { type: 'SET_NARRATOR_PRESENTATION', ...presentationRef.current },
       workerOrigin,
     );
-  }, [workerOrigin]);
+  }, [workerOrigin, postLayoutSplit]);
+
+  // Keep the split in step with the frame's height. Hexa's hexagon section has
+  // a fixed pixel cost - two pills and their gaps - that a percentage cannot
+  // know about, so the share it needs depends on how tall the frame currently
+  // is. The frame is watched rather than the pane, and its *layout* height is
+  // what a ResizeObserver reports: the stylesheet draws it scaled down to buy
+  // horizontal room, but the viewport inside it is the untransformed box, and
+  // that is the number Hexa's own percentage is applied to.
+  useEffect(() => {
+    const frame = iframeRef.current;
+    if (!frame || typeof ResizeObserver === 'undefined') return;
+
+    const apply = (frameHeight: number) => {
+      const next = resolveHexagonSplitPercent(frameHeight);
+      if (next === hexagonSplitRef.current) return;
+      hexagonSplitRef.current = next;
+      // A frame that has not loaded yet has nothing listening, which is fine:
+      // the ref is what `configureIframe` reads on load.
+      postLayoutSplit(next);
+    };
+
+    apply(frame.offsetHeight);
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) apply(entry.contentRect.height);
+    });
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, [sessionId, postLayoutSplit]);
 
   const handleIframeLoad = useCallback(() => {
     iframeSetupTimeoutsRef.current.forEach(window.clearTimeout);

@@ -196,6 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_session_expires_at ON mail0_session(expires_at);
 CREATE INDEX IF NOT EXISTS idx_account_user_id ON mail0_account(userId);
 CREATE INDEX IF NOT EXISTS idx_account_provider_user_id ON mail0_account(provider_id, userId);
 CREATE INDEX IF NOT EXISTS idx_account_expires_at ON mail0_account(access_token_expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS connection_user_id_email_unique ON mail0_connection(userId, email);
 CREATE INDEX IF NOT EXISTS idx_connection_user_id ON mail0_connection(userId);
 CREATE INDEX IF NOT EXISTS idx_connection_email ON mail0_connection(email);
 CREATE INDEX IF NOT EXISTS idx_connection_expires_at ON mail0_connection(expires_at);

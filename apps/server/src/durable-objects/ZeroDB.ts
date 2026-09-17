@@ -15,6 +15,34 @@ import { eq, and, desc, asc, inArray } from 'drizzle-orm';
 import { EProviders } from '../types';
 import { defaultUserSettings } from '../lib/schemas';
 
+/**
+ * The D1 tables are declared with snake_case columns (`src/db/migrations-d1.sql`)
+ * while every caller reads the camelCase field names from `schema-d1.ts`. A raw
+ * `SELECT *` hands the column names back verbatim, so rows have to be mapped on
+ * the way out — the same translation `ZeroDriver.setupAuth` does by hand.
+ */
+const toCamelCase = (key: string) => key.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+
+const toSnakeCase = (key: string) => key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+
+const mapRow = <T>(row: Record<string, unknown> | null | undefined): T | undefined => {
+  if (!row) return undefined;
+  return Object.fromEntries(
+    Object.entries(row).map(([key, value]) => [toCamelCase(key), value]),
+  ) as T;
+};
+
+/**
+ * `D1PreparedStatement.all()` resolves to a `D1Result` wrapper — `{ results, success,
+ * meta }` — never to a bare array. Returning it unwrapped is what made
+ * `connections.filter is not a function` reach the inbox.
+ */
+const mapRows = <T>(result: D1Result<Record<string, unknown>>): T[] =>
+  (result.results ?? []).map((row) => mapRow<T>(row) as T);
+
+/** D1 cannot bind a `Date`; `createConnection` already stores timestamps as ISO strings. */
+const toBindable = (value: unknown) => (value instanceof Date ? value.toISOString() : value);
+
 export class ZeroDB extends DurableObject<Env> {
   private db: D1Database | null = null;
 
@@ -113,7 +141,7 @@ export class ZeroDB extends DurableObject<Env> {
 
     const result = await this.sql('SELECT * FROM mail0_user WHERE id = ?', [userId]);
     const userData = await result.first();
-    return userData || undefined;
+    return mapRow<typeof user.$inferSelect>(userData);
   }
 
   async findUserSettings(userId: string) {
@@ -127,7 +155,7 @@ export class ZeroDB extends DurableObject<Env> {
 
     const result = await this.sql('SELECT * FROM mail0_user_settings WHERE user_id = ?', [userId]);
     const settingsData = await result.first();
-    return settingsData || undefined;
+    return mapRow<typeof userSettings.$inferSelect>(settingsData);
   }
 
   async insertUserSettings(userId: string, settings: any) {
@@ -187,11 +215,11 @@ export class ZeroDB extends DurableObject<Env> {
     }
 
     const result = await this.sql(
-      'SELECT * FROM mail0_connection WHERE id = ? AND userId = ?',
+      'SELECT * FROM mail0_connection WHERE id = ? AND user_id = ?',
       [connectionId, userId]
     );
     const connectionData = await result.first();
-    return connectionData || undefined;
+    return mapRow<typeof connection.$inferSelect>(connectionData);
   }
 
   async updateUser(userId: string, data: Partial<typeof user.$inferInsert>) {
@@ -204,15 +232,18 @@ export class ZeroDB extends DurableObject<Env> {
         .where(eq(user.id, userId));
     }
 
-    const fields = Object.keys(data).filter(key => key !== 'id');
-    const values = Object.values(data).filter(value => value !== undefined);
-    
-    if (fields.length === 0) return;
+    // Keys and values have to be taken from the same entries: filtering them
+    // separately shifts every value one column left as soon as one is undefined.
+    const entries = Object.entries(data).filter(
+      ([key, value]) => key !== 'id' && value !== undefined,
+    );
 
-    const setClause = fields.map(field => `${field} = ?`).join(', ');
-          const query = `UPDATE mail0_user SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`;
-    
-    await this.sql(query, [...values, userId]);
+    if (entries.length === 0) return;
+
+    const setClause = entries.map(([field]) => `${toSnakeCase(field)} = ?`).join(', ');
+    const query = `UPDATE mail0_user SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`;
+
+    await this.sql(query, [...entries.map(([, value]) => toBindable(value)), userId]);
   }
 
   async deleteConnection(connectionId: string, userId: string) {
@@ -225,7 +256,7 @@ export class ZeroDB extends DurableObject<Env> {
     }
 
     await this.sql(
-      'DELETE FROM mail0_connection WHERE id = ? AND userId = ?',
+      'DELETE FROM mail0_connection WHERE id = ? AND user_id = ?',
       [connectionId, userId]
     );
   }
@@ -244,7 +275,7 @@ export class ZeroDB extends DurableObject<Env> {
       [userId]
     );
     const connectionData = await result.first();
-    return connectionData || undefined;
+    return mapRow<typeof connection.$inferSelect>(connectionData);
   }
 
   async findManyConnections(userId: string) {
@@ -260,7 +291,7 @@ export class ZeroDB extends DurableObject<Env> {
       'SELECT * FROM mail0_connection WHERE user_id = ? ORDER BY created_at ASC',
       [userId]
     );
-    return await result.all();
+    return mapRows<typeof connection.$inferSelect>(await result.all());
   }
 
   async createConnection(
@@ -416,7 +447,7 @@ export class ZeroDB extends DurableObject<Env> {
     // First, let's check what tables exist
     try {
       const allTables = await this.sql('SELECT name FROM sqlite_master WHERE type="table"');
-      const tables = await allTables.all();
+      const tables = (await allTables.all()).results;
       console.log('All tables in database:', tables);
       
       const tableCheck = await this.sql('SELECT name FROM sqlite_master WHERE type="table" AND name="mail0_connection"');
@@ -462,15 +493,48 @@ export class ZeroDB extends DurableObject<Env> {
       throw new Error('Refresh token is required for connection creation');
     }
     
+    // `INSERT OR REPLACE` only de-duplicates on a unique constraint, and the id
+    // is a fresh UUID every call, so a re-login used to append another row for
+    // the same mailbox. Reuse the existing row when we already hold one.
+    const existingRow = await (
+      await this.sql(
+        'SELECT id FROM mail0_connection WHERE user_id = ? AND email = ? LIMIT 1',
+        [userId, email],
+      )
+    ).first<{ id: string }>();
+
+    if (existingRow?.id) {
+      console.log('Refreshing existing connection instead of inserting a duplicate:', existingRow.id);
+      // `sql()` only binds the statement - a write has to be run explicitly.
+      await (
+        await this.sql(
+          `UPDATE mail0_connection
+           SET provider_id = ?, access_token = ?, refresh_token = ?, expires_at = ?, scope = ?, name = ?, picture = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [
+            providerId,
+            sanitizedUpdatingInfo.accessToken,
+            sanitizedUpdatingInfo.refreshToken,
+            expiresAt.toISOString(),
+            scopeValue,
+            sanitizedUpdatingInfo.name || null,
+            sanitizedUpdatingInfo.picture || null,
+            existingRow.id,
+          ],
+        )
+      ).run();
+      return [{ id: existingRow.id }];
+    }
+
     console.log('Inserting connection with tokens:', {
       connectionId,
       accessToken: sanitizedUpdatingInfo.accessToken ? 'SET' : 'NULL',
       refreshToken: sanitizedUpdatingInfo.refreshToken ? 'SET' : 'NULL',
       scope: scopeValue,
     });
-    
+
     await this.sql(
-      `INSERT OR REPLACE INTO mail0_connection 
+      `INSERT OR REPLACE INTO mail0_connection
        (id, user_id, provider_id, email, access_token, refresh_token, expires_at, scope, name, picture, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       [
@@ -503,15 +567,16 @@ export class ZeroDB extends DurableObject<Env> {
         .where(eq(connection.id, connectionId));
     }
 
-    const fields = Object.keys(updatingInfo).filter(key => key !== 'id');
-    const values = Object.values(updatingInfo).filter(value => value !== undefined);
-    
-    if (fields.length === 0) return;
+    const entries = Object.entries(updatingInfo).filter(
+      ([key, value]) => key !== 'id' && value !== undefined,
+    );
 
-    const setClause = fields.map(field => `${field} = ?`).join(', ');
-          const query = `UPDATE mail0_connection SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`;
-    
-    await this.sql(query, [...values, connectionId]);
+    if (entries.length === 0) return;
+
+    const setClause = entries.map(([field]) => `${toSnakeCase(field)} = ?`).join(', ');
+    const query = `UPDATE mail0_connection SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`;
+
+    await this.sql(query, [...entries.map(([, value]) => toBindable(value)), connectionId]);
   }
 
   // Thread operations
@@ -558,7 +623,7 @@ export class ZeroDB extends DurableObject<Env> {
       'SELECT data FROM threads WHERE connection_id = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?',
       [connectionId, limit, offset]
     );
-    const threads = await result.all();
+    const threads = (await result.all<{ data: string }>()).results;
     return threads.map(thread => JSON.parse(thread.data));
   }
 

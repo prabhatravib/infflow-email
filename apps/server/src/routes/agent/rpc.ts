@@ -90,6 +90,15 @@ export class DriverRpcDO extends RpcTarget {
     return await this.mainDo.getThread(threadId, includeDrafts);
   }
 
+  /**
+   * Every method the tRPC layer reaches has to be listed here: `getZeroAgent`
+   * hands back this RpcTarget, not the Durable Object, so a method that exists
+   * only on `ZeroDriver` is invisible to callers and fails at runtime.
+   */
+  async getThreadHeaders(threadIds: string[]) {
+    return await this.mainDo.getThreadHeaders(threadIds);
+  }
+
   async markThreadsRead(threadIds: string[]) {
     const result = await Promise.all(
       threadIds.map((id) => this.mainDo.modifyThreadLabelsInDB(id, [], ['UNREAD'])),
