@@ -315,15 +315,20 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
     return () => window.removeEventListener('message', handleMessage);
   }, [workerOrigin, configureIframe, sessionId, handleImageRequest]);
 
+  // The line speaks for the open conversation and nothing else. With no email
+  // open it stays blank: a folder-wide tally here read as a claim about what
+  // Hexa had been handed, and it counted headers held by the client rather than
+  // the ones the pack actually carries.
+  const selectedStatus = selected?.status;
   const status = useMemo(() => {
-    if (contextStatus === 'failed') return 'Email context not delivered - retrying';
-    if (contextStatus === 'syncing') return 'Updating context...';
-    if (selected?.status === 'loading') return 'Loading the open email...';
-    if (selected?.status === 'error') return 'Open email unavailable';
-    if (selected?.status === 'ready') return 'Open email in context';
-    const count = snapshot.threads.length;
-    return `${count} email${count === 1 ? '' : 's'} in context`;
-  }, [contextStatus, selected?.status, snapshot.threads.length]);
+    if (!selectedStatus) return '';
+    if (selectedStatus === 'error') return 'This email could not be loaded';
+    if (selectedStatus === 'empty') return 'This email has no readable content';
+    if (selectedStatus === 'loading') return 'Loading this email...';
+    if (contextStatus === 'failed') return 'This email was not delivered - retrying';
+    if (contextStatus === 'syncing') return 'Sending this email to Hexa...';
+    return 'This email is loaded into Hexa';
+  }, [contextStatus, selectedStatus]);
 
   return (
     <section
@@ -331,7 +336,10 @@ export function HexaPanel({ hexaWorkerUrl }: HexaPanelProps) {
       aria-label="Voice assistant"
     >
       <div className="hexa-panel__header border-sidebar-border border-b">
-        <div className="min-w-0">
+        {/* The status paragraph stays mounted even while it is blank: a live
+            region that is added to the page at the same moment it gains text is
+            not reliably announced. */}
+        <div className="hexa-panel__heading min-w-0">
           <h2 className="text-sidebar-foreground truncate text-sm font-semibold">Voice Pane</h2>
           <p className="text-muted-foreground truncate text-xs" role="status">
             {status}

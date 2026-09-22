@@ -423,6 +423,13 @@
   padding: 0.5rem 0.75rem;
 }
 
+/* Holds the title and the status line. The status is blank with no email open,
+   so reserve its line here rather than letting the header change height each
+   time the reader opens or closes a conversation. */
+.hexa-panel__heading {
+  min-height: 2.25rem;
+}
+
 .hexa-panel__actions {
   display: flex;
   align-items: center;
